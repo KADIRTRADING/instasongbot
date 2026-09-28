@@ -45,28 +45,34 @@ def build_format_keyboard(probe_job_id: str, probe: ProbeResult, translator: Tra
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def build_video_action_keyboard(probe_job_id: str, translator: Translator) -> InlineKeyboardMarkup:
-    """The three explicit choices required for the "video tools" flow:
-    identify the song, extract audio, or download the original video.
+def build_video_action_keyboard(ref_id: str, translator: Translator, *, source: str) -> InlineKeyboardMarkup:
+    """The video-tools choices (see ARCHITECTURE.md §4.3): identify the song,
+    extract audio, and — only when `source == "link"` — download the
+    original video. For an uploaded file (`source == "upload"`), "download
+    the original" is omitted: the user already has that exact file, so
+    offering to send it back to them is pointless.
     """
     rows = [
         [
             InlineKeyboardButton(
                 text=translator.t("action_identify_song"),
-                callback_data=VideoActionCallback(probe_job_id=probe_job_id, action="identify").pack(),
+                callback_data=VideoActionCallback(ref_id=ref_id, action="identify", source=source).pack(),
             )
         ],
         [
             InlineKeyboardButton(
                 text=translator.t("action_extract_audio"),
-                callback_data=VideoActionCallback(probe_job_id=probe_job_id, action="audio").pack(),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=translator.t("action_download_original"),
-                callback_data=VideoActionCallback(probe_job_id=probe_job_id, action="video").pack(),
+                callback_data=VideoActionCallback(ref_id=ref_id, action="audio", source=source).pack(),
             )
         ],
     ]
+    if source == "link":
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=translator.t("action_download_original"),
+                    callback_data=VideoActionCallback(ref_id=ref_id, action="video", source=source).pack(),
+                )
+            ]
+        )
     return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -2,12 +2,17 @@
 links (see app/services/storage/local_backend.py).
 
 Mounted at /files/{filename} in two places:
-  - The webhook entrypoint (app/webhook_app.py) simply adds this route to its
-    existing aiohttp Application alongside the Telegram webhook route.
-  - The long-polling entrypoint (app/main.py) runs this as a small standalone
-    aiohttp server on WEB_SERVER_PORT, since long polling itself has no HTTP
-    server otherwise, and locally-stored large files still need to be
-    reachable by a URL sent to the user in Telegram.
+  - The webhook entrypoint (app/webhook_app.py) calls `register_file_routes()`
+    to add this exact route to its existing aiohttp Application, alongside
+    the Telegram webhook route — same process, same port, one aiohttp app.
+    (aiohttp's `add_subapp()` was deliberately not used for this: it requires
+    a non-empty path *prefix*, which would force the route to live at
+    something like /files-app/files/{filename} instead of the intended
+    /files/{filename}, breaking every link this module signs.)
+  - The long-polling entrypoint (app/main.py) runs `create_file_server_app()`
+    as a small standalone aiohttp server on WEB_SERVER_PORT, since long
+    polling itself has no HTTP server otherwise, and locally-stored large
+    files still need to be reachable by a URL sent to the user in Telegram.
 
 Every request's signature+expiry is verified before any bytes are served —
 an unsigned or expired link returns 403/404, never a directory listing or an
@@ -33,10 +38,23 @@ _SAFE_FILENAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 SETTINGS_KEY = web.AppKey("settings", Settings)
 
 
-def create_file_server_app(settings: Settings) -> web.Application:
-    app = web.Application()
+def register_file_routes(app: web.Application, settings: Settings) -> None:
+    """Add the `/files/{filename}` route (and its settings dependency) to an
+    EXISTING aiohttp Application — used by app/webhook_app.py so the webhook
+    route and the file-serving route share one process/port. Safe to call on
+    an app that also has other routes/middlewares already registered.
+    """
     app[SETTINGS_KEY] = settings
     app.router.add_get("/files/{filename}", _handle_download)
+
+
+def create_file_server_app(settings: Settings) -> web.Application:
+    """Build a standalone aiohttp app with only the file-serving route —
+    used by app/main.py (long-polling mode), which has no other aiohttp app
+    of its own to attach this route to.
+    """
+    app = web.Application()
+    register_file_routes(app, settings)
     return app
 
 

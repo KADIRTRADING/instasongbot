@@ -1,0 +1,110 @@
+# Core compose file — safe to use as-is for either local development OR a
+# first production deployment (see docker-compose.prod.yml for the optional
+# hardening layer: resource limits, log rotation, restart:always, webhook
+# mode, Caddy). Brings up Postgres, Redis, the bot (long polling by default
+# — no public URL/TLS needed, see ARCHITECTURE.md §11), and one worker
+# process. All four run from the SAME image (Dockerfile), differing only by
+# `command:` — exactly matching "bot and worker are the same Docker image"
+# in ARCHITECTURE.md §2.
+#
+# Quick start:
+#   1. cp .env.example .env    # fill in BOT_TOKEN at minimum
+#   2. docker compose up --build
+#   3. alembic runs automatically before the bot starts (see bot's command)
+#
+# Postgres/Redis are NOT published to the host here: the bot/worker
+# containers reach them over the compose network via their service names
+# (`postgres`, `redis`) regardless, and there's no reason a production
+# server should expose a database port to the world. For local `psql`/
+# `redis-cli` debugging convenience, see docker-compose.override.yml, which
+# `docker compose up` merges in automatically as long as you DON'T pass
+# explicit `-f` flags (the moment you run `-f docker-compose.yml -f
+# docker-compose.prod.yml`, Compose stops auto-loading the override file —
+# see https://docs.docker.com/compose/how-tos/multiple-compose-files/merge/
+# — which is exactly the behavior we want: debug ports in local dev, never
+# in the explicit production invocation).
+#
+# Note on merging: Compose concatenates list-typed fields (like `ports`)
+# across merged files rather than letting a later file shrink/clear them,
+# so docker-compose.prod.yml intentionally never tries to "remove" anything
+# this file defines — it only adds hardening on top. Keeping ports/volumes
+# out of this base file for anything that shouldn't be in production is
+# what makes that additive-only prod overlay possible.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: instasongbot
+      POSTGRES_PASSWORD: instasongbot
+      POSTGRES_DB: instasongbot
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U instasongbot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://instasongbot:instasongbot@postgres:5432/instasongbot
+      REDIS_URL: redis://redis:6379/0
+      USE_WEBHOOK: "false"
+      WORKDIR: /data
+      WEB_SERVER_HOST: "0.0.0.0"
+    # Runs pending migrations before every start -- safe to run repeatedly
+    # (alembic no-ops if already at head), and means a fresh `docker compose
+    # up` on an empty Postgres volume just works without a separate manual
+    # migration step.
+    command: >
+      sh -c "alembic upgrade head && python -m app.main"
+    volumes:
+      - bot_data:/data
+    ports:
+      - "8080:8080" # local storage backend's file-serving port, see app/file_server.py
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://instasongbot:instasongbot@postgres:5432/instasongbot
+      REDIS_URL: redis://redis:6379/0
+      WORKDIR: /data
+    command: ["arq", "app.workers.settings.WorkerSettings"]
+    volumes:
+      - bot_data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  # Shared between bot and worker: both need the SAME /data/large_files
+  # directory when STORAGE_BACKEND=local, since the bot serves the files the
+  # worker wrote there (see app/services/storage/local_backend.py and
+  # app/file_server.py). Irrelevant/unused when STORAGE_BACKEND=s3.
+  bot_data:

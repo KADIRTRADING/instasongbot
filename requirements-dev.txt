@@ -3,6 +3,7 @@
 # Testing
 pytest==8.4.2
 pytest-asyncio==1.2.0
+pytest-cov==7.0.0
 respx==0.23.1
 fakeredis==2.38.0
 # lupa gives fakeredis real Lua EVAL/EVALSHA support, needed to test

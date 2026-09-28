@@ -53,9 +53,19 @@ class DownloadManager:
             return await self._pinterest.probe(url)
         return await self._ytdlp.probe(url, platform)
 
-    async def download(self, probe: ProbeResult, format_id: str, destination_dir: Path) -> DownloadedFile:
+    async def download(
+        self, probe: ProbeResult, format_id: str, destination_dir: Path, *, max_bytes: int | None = None
+    ) -> DownloadedFile:
+        """`max_bytes` defaults to `Settings.MAX_DOWNLOAD_MB` when omitted, but
+        callers (see app/workers/tasks.py's `_resolve_max_download_bytes`) may
+        pass an admin-configured override — a per-platform limit or a global
+        one, both editable live via the admin panel (§4.5 / §6) without a
+        redeploy. Keeping the parameter optional preserves the simple
+        3-positional-arg call used throughout the live tests.
+        """
         destination_dir.mkdir(parents=True, exist_ok=True)
-        max_bytes = self._settings.MAX_DOWNLOAD_MB * 1024 * 1024
+        if max_bytes is None:
+            max_bytes = self._settings.MAX_DOWNLOAD_MB * 1024 * 1024
         platform = Platform(probe.platform) if probe.platform in {p.value for p in Platform} else None
 
         if platform == Platform.PINTEREST:

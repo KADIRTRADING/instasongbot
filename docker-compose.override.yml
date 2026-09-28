@@ -1,0 +1,20 @@
+# Local-development convenience only — NOT part of the deployed stack.
+#
+# `docker compose up` (with no explicit `-f` flags) auto-merges this file on
+# top of docker-compose.yml; the moment you invoke Compose with explicit
+# `-f` flags (as docker-compose.prod.yml's own instructions do:
+# `-f docker-compose.yml -f docker-compose.prod.yml`), Compose stops
+# auto-loading this file, so none of this ever reaches a production
+# deployment by accident. See
+# https://docs.docker.com/compose/how-tos/multiple-compose-files/merge/.
+#
+# All it does: publish Postgres/Redis to the host so you can `psql` or
+# `redis-cli` into them directly from your machine while developing.
+services:
+  postgres:
+    ports:
+      - "5432:5432"
+
+  redis:
+    ports:
+      - "6379:6379"

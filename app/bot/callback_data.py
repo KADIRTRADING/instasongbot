@@ -43,20 +43,30 @@ class DownloadFormatCallback:
 
 @dataclass(frozen=True)
 class VideoActionCallback:
-    probe_job_id: str
+    """`ref_id` is a lookup key, not the media itself (Telegram file_ids are
+    80+ bytes, well over the 64-byte callback_data ceiling — see module
+    docstring). What it references depends on `source`:
+      - source="link": ref_id is a probe_job_id, resolved via
+        app/bot/probe_cache.py against a previously-probed URL.
+      - source="upload": ref_id is an upload_job_id, resolved via
+        app/bot/upload_cache.py against a Telegram file_id the user sent.
+    """
+
+    ref_id: str
     action: str  # "identify" | "audio" | "video"
+    source: str  # "link" | "upload"
 
     PREFIX = "va"
 
     def pack(self) -> str:
-        packed = _SEP.join([self.PREFIX, self.probe_job_id, self.action])
+        packed = _SEP.join([self.PREFIX, self.ref_id, self.action, self.source])
         _assert_fits(packed)
         return packed
 
     @classmethod
     def unpack(cls, data: str) -> "VideoActionCallback":
-        _, probe_job_id, action = _split(data, expected_parts=3, expected_prefix=cls.PREFIX)
-        return cls(probe_job_id=probe_job_id, action=action)
+        _, ref_id, action, source = _split(data, expected_parts=4, expected_prefix=cls.PREFIX)
+        return cls(ref_id=ref_id, action=action, source=source)
 
 
 @dataclass(frozen=True)

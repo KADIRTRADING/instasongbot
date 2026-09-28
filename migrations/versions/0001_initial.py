@@ -37,7 +37,7 @@ def upgrade() -> None:
     sa.Column('sent_count', sa.Integer(), nullable=False),
     sa.Column('failed_count', sa.Integer(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.Column('completed_at', sa.DateTime(), nullable=True),
+    sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True),
     sa.PrimaryKeyConstraint('id')
     )
     op.create_table('caption_buttons',

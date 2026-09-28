@@ -1,0 +1,101 @@
+# Production overlay — use together with docker-compose.yml, never alone:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# What this changes vs. the base file (ARCHITECTURE.md §11):
+#   - Adds resource limits so one runaway ffmpeg process or a burst of
+#     concurrent downloads can't take down the whole box (see
+#     ARCHITECTURE.md §10's "basic abuse prevention").
+#   - Adds log rotation (Docker's json-file driver has no size cap by
+#     default — an unbounded log file is a real, if boring, way to fill a
+#     server's disk over months of uptime).
+#   - Switches the bot service to webhook mode + adds the optional Caddy
+#     reverse proxy (automatic HTTPS via Let's Encrypt) — set USE_WEBHOOK=true
+#     related vars in .env and point your domain's DNS at this box first.
+#     If you'd rather stick with long polling in production (the simpler,
+#     no-inbound-port option — see README's recommendation for a first
+#     deployment), just don't set WEBHOOK_BASE_URL and don't start the caddy
+#     profile; the base file's polling `command:` still applies unmodified.
+#   - `restart: always` (vs. the base file's `unless-stopped`) so the stack
+#     comes back up after a host reboot without a manual `docker compose up`.
+#
+# Caddy is under the `proxy` profile (opt-in): `docker compose ... --profile
+# proxy up -d` to include it. Left out of the default `up` so webhook mode
+# isn't accidentally half-enabled (proxy running, but bot still polling)
+# just by using this overlay file, which also makes sense on its own for
+# services that don't need it, like resource limits, for a polling deployment.
+
+services:
+  postgres:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  redis:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  bot:
+    restart: always
+    environment:
+      # Flip to webhook mode here (requires WEBHOOK_BASE_URL/WEBHOOK_SECRET
+      # set in .env, and the `proxy` profile below, or your own reverse
+      # proxy/TLS termination in front of this box). Leave as "false" (the
+      # base file's default) to stay on long polling in production.
+      USE_WEBHOOK: "${USE_WEBHOOK:-false}"
+    command: >
+      sh -c "alembic upgrade head && if [ \"$$USE_WEBHOOK\" = \"true\" ]; then python -m app.webhook_app; else python -m app.main; fi"
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  worker:
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 1G # ffmpeg/yt-dlp are the heaviest memory consumers in this stack
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["proxy"]
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - bot
+
+volumes:
+  caddy_data:
+  caddy_config:

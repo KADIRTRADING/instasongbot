@@ -14,13 +14,23 @@ ourselves and never let them propagate into arq's retry machinery.
 
 from __future__ import annotations
 
+import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import FSInputFile
 
 from app.constants import MediaType
-from app.db.repositories import CaptionRepository, JobRepository, PlatformRepository, UserRepository
+from app.db.repositories import (
+    BotSettingRepository,
+    BroadcastRepository,
+    CaptionRepository,
+    JobRepository,
+    PlatformRepository,
+    UserRepository,
+)
 from app.i18n.translator import get_translator
 from app.logging_conf import get_logger
 from app.services.captions.renderer import CaptionContext, CaptionRenderer
@@ -85,6 +95,26 @@ async def _get_user_translator(ctx: WorkerContext, user_id: int):
     return get_translator(language)
 
 
+async def _resolve_max_download_bytes(ctx: WorkerContext, platform: str | None) -> int:
+    """Admin-configurable download size ceiling (§4.5/§6): a per-platform
+    override (`PlatformRepository.set_max_file_size_mb`) wins if set, else the
+    admin-editable global override (`bot_settings["max_download_mb"]`, see
+    handlers/admin.py's "limits" flow) wins if set, else the env-sourced
+    `Settings.MAX_DOWNLOAD_MB` cold default. Without this lookup the admin
+    "File Size Limits" menu would silently do nothing — nothing else in the
+    codebase reads either of those two settings.
+    """
+    async with ctx.sessionmaker() as session:
+        if platform:
+            per_platform = await PlatformRepository.get_max_file_size_mb(session, platform)
+            if per_platform is not None:
+                return per_platform * 1024 * 1024
+        global_override = await BotSettingRepository.get(session, "max_download_mb", default=None)
+    if global_override is not None:
+        return int(global_override) * 1024 * 1024
+    return ctx.settings.MAX_DOWNLOAD_MB * 1024 * 1024
+
+
 async def _render_and_get_buttons(ctx: WorkerContext, media_type: MediaType, context: CaptionContext):
     async with ctx.sessionmaker() as session:
         template = await CaptionRepository.get_template(session, media_type.value)
@@ -93,8 +123,24 @@ async def _render_and_get_buttons(ctx: WorkerContext, media_type: MediaType, con
     return CaptionRenderer.render(template, context, buttons)
 
 
-async def recognize_job(ctx_dict: dict[str, Any], *, job_id: str, user_id: int, chat_id: int, message_id: int, source_file_id: str) -> None:
-    """Identify the song in a Telegram-hosted audio/voice/video file."""
+async def recognize_job(
+    ctx_dict: dict[str, Any],
+    *,
+    job_id: str,
+    user_id: int,
+    chat_id: int,
+    message_id: int,
+    source_file_id: str | None = None,
+    probe_job_id: str | None = None,
+    format_id: str | None = None,
+) -> None:
+    """Identify the song in either a Telegram-hosted upload (`source_file_id`)
+    or a previously-probed link (`probe_job_id` + `format_id`) — the same
+    "upload or link" duality `convert_job` already supports, so "identify the
+    song" behaves consistently regardless of which of the two the video came
+    from (see handlers/convert.py, which is the only caller that uses the
+    link path; handlers/recognize.py only ever uses the upload path).
+    """
     ctx: WorkerContext = ctx_dict["worker_ctx"]
     translator = await _get_user_translator(ctx, user_id)
 
@@ -104,8 +150,18 @@ async def recognize_job(ctx_dict: dict[str, Any], *, job_id: str, user_id: int, 
 
     try:
         async with TempJobDir(ctx.settings.WORKDIR, job_id) as job_dir:
-            source_path = job_dir / "source"
-            await ctx.bot.download(source_file_id, destination=source_path)
+            if source_file_id:
+                source_path = job_dir / "source"
+                await ctx.bot.download(source_file_id, destination=source_path)
+            else:
+                from app.bot.probe_cache import load_probe_result
+
+                probe_for_source = await load_probe_result(ctx.redis, probe_job_id)
+                if probe_for_source is None:
+                    raise ContentNotFoundError("This link expired, please send it again")
+                max_bytes = await _resolve_max_download_bytes(ctx, probe_for_source.platform)
+                downloaded = await ctx.download_manager.download(probe_for_source, format_id, job_dir, max_bytes=max_bytes)
+                source_path = downloaded.path
 
             probe = await ctx.media_tools.probe(source_path)
             clip_path = await ctx.media_tools.extract_recognition_clip(
@@ -185,14 +241,27 @@ async def probe_job(ctx_dict: dict[str, Any], *, job_id: str, user_id: int, chat
 
         await store_probe_result(ctx.redis, job_id, probe)
 
-        from app.bot.keyboards.download import build_format_keyboard
+        has_video = any(f.media_type == MediaType.VIDEO for f in probe.formats)
 
-        keyboard = build_format_keyboard(job_id, probe, translator)
-        text = (
-            translator.t("choose_download_option_carousel", count=len(probe.formats))
-            if len(probe.formats) > 1 and all(f.media_type == MediaType.IMAGE for f in probe.formats)
-            else translator.t("choose_download_option")
-        )
+        if has_video:
+            # A link that resolves to video gets the same 3-way choice as an
+            # uploaded video (identify song / extract audio / download
+            # original) — see ARCHITECTURE.md §4.3 and
+            # app/bot/handlers/convert.py, which owns the VideoActionCallback
+            # this keyboard produces.
+            from app.bot.keyboards.download import build_video_action_keyboard
+
+            keyboard = build_video_action_keyboard(job_id, translator, source="link")
+            text = translator.t("choose_video_action")
+        else:
+            from app.bot.keyboards.download import build_format_keyboard
+
+            keyboard = build_format_keyboard(job_id, probe, translator)
+            text = (
+                translator.t("choose_download_option_carousel", count=len(probe.formats))
+                if len(probe.formats) > 1 and all(f.media_type == MediaType.IMAGE for f in probe.formats)
+                else translator.t("choose_download_option")
+            )
         await ctx.bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, reply_markup=keyboard)
 
         async with ctx.sessionmaker() as session:
@@ -232,7 +301,8 @@ async def download_job(
             raise ContentNotFoundError("This link expired, please send it again")
 
         async with TempJobDir(ctx.settings.WORKDIR, job_id) as job_dir:
-            downloaded = await ctx.download_manager.download(probe, format_id, job_dir)
+            max_bytes = await _resolve_max_download_bytes(ctx, probe.platform)
+            downloaded = await ctx.download_manager.download(probe, format_id, job_dir, max_bytes=max_bytes)
             source_name = _friendly_platform_name(translator, probe.platform)
             await _deliver_file(ctx, chat_id, message_id, downloaded, source=source_name, translator=translator)
 
@@ -255,9 +325,9 @@ async def convert_job(
     user_id: int,
     chat_id: int,
     message_id: int,
-    source_file_id: str | None,
-    probe_job_id: str | None,
-    format_id: str | None,
+    source_file_id: str | None = None,
+    probe_job_id: str | None = None,
+    format_id: str | None = None,
 ) -> None:
     """Video -> MP3 extraction, for either an uploaded file (source_file_id)
     or a previously-probed link (probe_job_id + format_id)."""
@@ -280,7 +350,8 @@ async def convert_job(
                 probe = await load_probe_result(ctx.redis, probe_job_id)
                 if probe is None:
                     raise ContentNotFoundError("This link expired, please send it again")
-                downloaded = await ctx.download_manager.download(probe, format_id, job_dir)
+                max_bytes = await _resolve_max_download_bytes(ctx, probe.platform)
+                downloaded = await ctx.download_manager.download(probe, format_id, job_dir, max_bytes=max_bytes)
                 source_path = downloaded.path
                 source_title = downloaded.title
 
@@ -354,3 +425,70 @@ async def _fail_job(ctx: WorkerContext, job_id: str, chat_id: int, message_id: i
     async with ctx.sessionmaker() as session:
         await JobRepository.mark_failed(session, job_id, error_detail)
         await session.commit()
+
+
+async def broadcast_job(ctx_dict: dict[str, Any], *, broadcast_id: str) -> None:
+    """Send an admin's announcement to every non-banned user (ARCHITECTURE.md
+    §6). Runs as its own background job specifically so a broadcast to
+    thousands of users can't block anything else — and so its own progress
+    (sent/failed counts) is observable in the `broadcasts` table rather than
+    being a fire-and-forget black box, per the admin-controls requirement.
+
+    A per-recipient failure (blocked bot, deactivated account, deleted chat)
+    is expected at scale and does not fail the whole broadcast — we count it
+    and move on. A `TelegramRetryAfter` (flood control) is honored by
+    actually sleeping for the requested duration before continuing, since
+    ignoring it would just get every subsequent send rate-limited too.
+    """
+    ctx: WorkerContext = ctx_dict["worker_ctx"]
+
+    async with ctx.sessionmaker() as session:
+        broadcast = await BroadcastRepository.get(session, broadcast_id)
+        if broadcast is None:
+            logger.error("broadcast_job_not_found", broadcast_id=broadcast_id)
+            return
+        user_ids = await UserRepository.iter_all_ids(session, exclude_banned=True)
+        await BroadcastRepository.update_progress(session, broadcast_id, total_users=len(user_ids), status="sending")
+        await session.commit()
+        message_text = broadcast.message_text
+
+    sent_count = 0
+    failed_count = 0
+
+    for user_id in user_ids:
+        try:
+            await ctx.bot.send_message(chat_id=user_id, text=message_text)
+            sent_count += 1
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(exc.retry_after)
+            try:
+                await ctx.bot.send_message(chat_id=user_id, text=message_text)
+                sent_count += 1
+            except Exception as retry_exc:  # noqa: BLE001 - one recipient's failure must not abort the whole broadcast
+                logger.warning("broadcast_send_failed_after_retry", user_id=user_id, error=str(retry_exc))
+                failed_count += 1
+        except TelegramForbiddenError:
+            # User blocked the bot or deleted their account — expected at
+            # scale, not worth logging individually.
+            failed_count += 1
+        except Exception as exc:  # noqa: BLE001 - see broadcast_job docstring
+            logger.warning("broadcast_send_failed", user_id=user_id, error=str(exc))
+            failed_count += 1
+
+        if (sent_count + failed_count) % 50 == 0:
+            async with ctx.sessionmaker() as session:
+                await BroadcastRepository.update_progress(session, broadcast_id, sent_count=sent_count, failed_count=failed_count)
+                await session.commit()
+
+    async with ctx.sessionmaker() as session:
+        await BroadcastRepository.update_progress(
+            session,
+            broadcast_id,
+            sent_count=sent_count,
+            failed_count=failed_count,
+            status="completed",
+            completed_at=datetime.now(UTC),
+        )
+        await session.commit()
+
+    logger.info("broadcast_job_completed", broadcast_id=broadcast_id, sent=sent_count, failed=failed_count)

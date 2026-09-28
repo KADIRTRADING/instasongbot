@@ -1,0 +1,30 @@
+# Caddy reverse proxy config for webhook mode (see docker-compose.prod.yml's
+# `proxy` profile and ARCHITECTURE.md §11). Caddy gets you automatic HTTPS
+# (Let's Encrypt) with essentially zero manual certificate management —
+# the only thing you must do yourself is point your domain's DNS A/AAAA
+# record at this server's public IP before starting this service, and set
+# BOT_DOMAIN in your .env to that same domain.
+#
+# Routes:
+#   /webhook       -> the bot's webhook endpoint (must match Settings.WEBHOOK_PATH)
+#   /files/*       -> the bot's local-storage large-file download links
+#                      (see app/file_server.py; irrelevant/unused if
+#                      STORAGE_BACKEND=s3, but harmless to leave routed)
+#
+# {$BOT_DOMAIN} is substituted from the BOT_DOMAIN environment variable at
+# Caddy startup (docker-compose.prod.yml passes .env through to this
+# container) — set it to the exact hostname in WEBHOOK_BASE_URL, without
+# the scheme, e.g. BOT_DOMAIN=bot.example.com for
+# WEBHOOK_BASE_URL=https://bot.example.com.
+
+{$BOT_DOMAIN} {
+    reverse_proxy /webhook* bot:8080
+    reverse_proxy /files/* bot:8080
+
+    encode gzip
+
+    log {
+        output stdout
+        format json
+    }
+}

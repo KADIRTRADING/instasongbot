@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, BigInteger, Boolean, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -123,4 +123,9 @@ class Broadcast(Base):
     sent_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = utcnow_column()
-    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Explicit timezone=True to match utcnow_column()'s columns elsewhere —
+    # writing a tz-aware datetime.now(UTC) (see workers/tasks.py's
+    # broadcast_job) into a bare DateTime() column makes asyncpg reject the
+    # value outright ("can't subtract offset-naive and offset-aware
+    # datetimes"), caught via a live test against real Postgres.
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -94,12 +94,31 @@ def test_build_format_keyboard_no_download_all_for_video_formats() -> None:
     assert len(keyboard.inline_keyboard) == 2
 
 
-def test_build_video_action_keyboard_has_three_options() -> None:
-    keyboard = build_video_action_keyboard("job-999", Translator("en"))
+def test_build_video_action_keyboard_has_three_options_for_a_link() -> None:
+    keyboard = build_video_action_keyboard("job-999", Translator("en"), source="link")
 
     assert len(keyboard.inline_keyboard) == 3
     actions = [VideoActionCallback.unpack(row[0].callback_data).action for row in keyboard.inline_keyboard]
     assert actions == ["identify", "audio", "video"]
+
+
+def test_build_video_action_keyboard_has_two_options_for_an_upload() -> None:
+    # "Download the original" is meaningless when the user just uploaded
+    # that exact file themselves.
+    keyboard = build_video_action_keyboard("job-999", Translator("en"), source="upload")
+
+    assert len(keyboard.inline_keyboard) == 2
+    actions = [VideoActionCallback.unpack(row[0].callback_data).action for row in keyboard.inline_keyboard]
+    assert actions == ["identify", "audio"]
+
+
+def test_build_video_action_keyboard_callback_carries_correct_source() -> None:
+    keyboard = build_video_action_keyboard("job-abc", Translator("en"), source="upload")
+
+    for row in keyboard.inline_keyboard:
+        callback = VideoActionCallback.unpack(row[0].callback_data)
+        assert callback.source == "upload"
+        assert callback.ref_id == "job-abc"
 
 
 def test_human_size_formats_small_files_in_kb() -> None:

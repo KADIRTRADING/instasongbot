@@ -180,7 +180,13 @@ class StatsRepository:
 
 DEFAULT_CAPTION_TEMPLATES: dict[str, str] = {
     "video": "🎬 {title}\n\n{source}\n\n🤖 @{bot_username}",
-    "audio": "🎵 {title} — {artist}\n\n{source}\n\n🤖 @{bot_username}",
+    # {artist} on its own line rather than "{title} — {artist}": a plain
+    # video-to-MP3 extraction (as opposed to a recognized song) has no known
+    # artist, and the renderer has no conditional logic (see
+    # app/services/captions/renderer.py's docstring on why — admin templates
+    # must never be able to crash delivery), so an empty {artist} degrades to
+    # one blank line here instead of a dangling "Title — " with nothing after it.
+    "audio": "🎵 {title}\n{artist}\n\n{source}\n\n🤖 @{bot_username}",
     "image": "🖼 {source}\n\n🤖 @{bot_username}",
 }
 

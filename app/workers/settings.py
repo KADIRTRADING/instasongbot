@@ -27,7 +27,7 @@ from app.services.media.tempfiles import cleanup_stale_dirs
 from app.services.recognition.factory import get_recognition_provider
 from app.services.storage.factory import get_storage_backend
 from app.workers.context import WorkerContext
-from app.workers.tasks import convert_job, download_job, probe_job, recognize_job
+from app.workers.tasks import broadcast_job, convert_job, download_job, probe_job, recognize_job
 
 logger = get_logger(__name__)
 
@@ -99,7 +99,7 @@ def _redis_settings_from_url(redis_url: str) -> RedisSettings:
 
 
 class WorkerSettings:
-    functions = [recognize_job, probe_job, download_job, convert_job]
+    functions = [recognize_job, probe_job, download_job, convert_job, broadcast_job]
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = _redis_settings_from_url(get_settings().REDIS_URL)

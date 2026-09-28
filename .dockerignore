@@ -1,0 +1,51 @@
+# Keeps the build context small and prevents dev-only artifacts (a stray
+# .env with real secrets, the test suite, caches) from ever being copied
+# into an image layer — the Dockerfile's COPY steps are explicit about what
+# it needs (app/, migrations/, alembic.ini, requirements.txt) so most of
+# this is belt-and-suspenders, but a lean context also makes `docker build`
+# faster by not hashing/sending files that will never be used.
+
+.git/
+.github/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.venv312/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Tests (not needed at runtime; kept out of the image entirely)
+tests/
+
+# Env / secrets — never bake a real .env into an image layer
+.env
+.env.*
+!.env.example
+
+# Runtime data / local dev scratch
+tmp/
+data/
+*.log
+media_cache/
+telegram-bot-api-data/
+
+# Docs (informational only, not needed for the app to run)
+README.md
+ARCHITECTURE.md
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Coverage
+.coverage
+htmlcov/
