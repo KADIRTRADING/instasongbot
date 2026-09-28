@@ -12,7 +12,7 @@ import pytest
 from aiogram import Bot, Dispatcher, Router, flags
 from aiogram.client.session.base import BaseSession
 from aiogram.methods import TelegramMethod
-from aiogram.types import CallbackQuery, Chat, Message, Update
+from aiogram.types import Chat, Message, Update
 from aiogram.types import User as TgUser
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -61,7 +61,7 @@ async def db_engine():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     db_session_module._engine = engine
-    from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
     db_session_module._sessionmaker = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
     yield engine

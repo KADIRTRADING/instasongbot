@@ -27,7 +27,6 @@ from app.config import Settings
 from app.constants import JobType
 from app.db import session as db_session_module
 from app.db.base import Base
-from app.db.repositories import JobRepository
 from app.services.ratelimit.limiter import RateLimiter
 
 
@@ -224,20 +223,3 @@ async def test_recognize_rate_limit_denies_after_configured_count(db_engine, bot
 
     assert mock_arq_pool.enqueue_job.call_count == 1  # second was throttled
 
-
-# --- Menu prompt ---------------------------------------------------------
-
-
-async def test_find_music_menu_button_sends_prompt(db_engine, bot, dispatcher, mock_arq_pool) -> None:
-    from app.i18n.translator import Translator
-
-    b, recording = bot
-    chat = Chat(id=999, type="private")
-    tg_user = TgUser(id=50, is_bot=False, first_name="Alice")
-    label = Translator("en").t("menu_find_music")
-    message = Message(message_id=1, date=0, chat=chat, from_user=tg_user, text=label)
-    await dispatcher.feed_update(b, Update(update_id=1, message=message))
-
-    mock_arq_pool.enqueue_job.assert_not_called()
-    assert len(recording.calls) == 1
-    assert recording.calls[0].__class__.__name__ == "SendMessage"

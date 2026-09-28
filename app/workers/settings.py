@@ -25,9 +25,18 @@ from app.services.downloader.manager import DownloadManager
 from app.services.media.ffmpeg_tools import MediaTools
 from app.services.media.tempfiles import cleanup_stale_dirs
 from app.services.recognition.factory import get_recognition_provider
+from app.services.search.factory import get_search_provider
 from app.services.storage.factory import get_storage_backend
 from app.workers.context import WorkerContext
-from app.workers.tasks import broadcast_job, convert_job, download_job, probe_job, recognize_job
+from app.workers.tasks import (
+    auto_download_job,
+    broadcast_job,
+    convert_job,
+    download_job,
+    recognize_job,
+    search_deliver_job,
+    search_job,
+)
 
 logger = get_logger(__name__)
 
@@ -59,6 +68,7 @@ async def on_startup(ctx: dict[str, Any]) -> None:
             timeout_seconds=settings.FFMPEG_TIMEOUT_SECONDS,
         ),
         storage_backend=get_storage_backend(settings),
+        search_provider=get_search_provider(settings),
     )
     logger.info("worker_started")
 
@@ -99,7 +109,15 @@ def _redis_settings_from_url(redis_url: str) -> RedisSettings:
 
 
 class WorkerSettings:
-    functions = [recognize_job, probe_job, download_job, convert_job, broadcast_job]
+    functions = [
+        recognize_job,
+        auto_download_job,
+        download_job,
+        convert_job,
+        broadcast_job,
+        search_job,
+        search_deliver_job,
+    ]
     on_startup = on_startup
     on_shutdown = on_shutdown
     redis_settings = _redis_settings_from_url(get_settings().REDIS_URL)

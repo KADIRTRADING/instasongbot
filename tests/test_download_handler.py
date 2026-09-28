@@ -29,7 +29,7 @@ from app.config import Settings
 from app.constants import JobType, MediaType
 from app.db import session as db_session_module
 from app.db.base import Base
-from app.db.repositories import JobRepository, PlatformRepository
+from app.db.repositories import PlatformRepository
 from app.services.downloader.models import MediaFormat, ProbeResult
 from app.services.ratelimit.limiter import RateLimiter
 
@@ -174,18 +174,20 @@ def _sample_probe(platform: str = "pinterest", n_images: int = 1) -> ProbeResult
 # --- Link detection --------------------------------------------------
 
 
-async def test_message_with_pinterest_link_enqueues_probe_job(db_engine, bot, dispatcher, mock_arq_pool) -> None:
+async def test_message_with_pinterest_link_enqueues_auto_download_job(db_engine, bot, dispatcher, mock_arq_pool) -> None:
     b, recording = bot
     await dispatcher.feed_update(b, _text_update("check this out https://www.pinterest.com/pin/123456789/ nice"))
 
     mock_arq_pool.enqueue_job.assert_called_once()
     args, kwargs = mock_arq_pool.enqueue_job.call_args
-    assert args[0] == "probe_job"
+    assert args[0] == "auto_download_job"
     assert kwargs["url"] == "https://www.pinterest.com/pin/123456789/"
     assert kwargs["chat_id"] == 999
 
 
-async def test_message_with_no_link_does_not_trigger_handler(db_engine, bot, dispatcher, mock_arq_pool) -> None:
+async def test_message_with_no_link_does_not_trigger_download_handler(db_engine, bot, dispatcher, mock_arq_pool) -> None:
+    # With only the download router registered, plain text (no URL) matches
+    # nothing here (it would go to the search router in the full app).
     b, recording = bot
     await dispatcher.feed_update(b, _text_update("just some regular text, no links"))
 
@@ -200,7 +202,19 @@ async def test_message_with_unsupported_link_does_not_trigger_handler(db_engine,
     mock_arq_pool.enqueue_job.assert_not_called()
 
 
-async def test_probe_job_row_created_with_correct_platform(db_engine, bot, dispatcher) -> None:
+async def test_instagram_share_url_is_normalized_before_enqueue(db_engine, bot, dispatcher, mock_arq_pool) -> None:
+    b, _ = bot
+    await dispatcher.feed_update(
+        b, _text_update("https://www.instagram.com/reels/ABC123/?igsh=trackingnoise", user_id=42)
+    )
+
+    mock_arq_pool.enqueue_job.assert_called_once()
+    _, kwargs = mock_arq_pool.enqueue_job.call_args
+    # /reels/ collapsed to /reel/ and the igsh tracking param stripped.
+    assert kwargs["url"] == "https://www.instagram.com/reel/ABC123/"
+
+
+async def test_auto_download_job_row_created_with_correct_platform(db_engine, bot, dispatcher) -> None:
     b, _ = bot
     await dispatcher.feed_update(b, _text_update("https://www.tiktok.com/@user/video/123", user_id=42))
 
@@ -211,7 +225,7 @@ async def test_probe_job_row_created_with_correct_platform(db_engine, bot, dispa
         from app.db.models import Job
 
         job = (await session.execute(select(Job).where(Job.user_id == 42))).scalar_one()
-        assert job.job_type == JobType.PROBE.value
+        assert job.job_type == JobType.DOWNLOAD.value
         assert job.platform == "tiktok"
 
 
@@ -229,15 +243,97 @@ async def test_disabled_platform_rejects_without_enqueueing(db_engine, bot, disp
     assert "disabled" in recording.calls[0].text.lower() or "❌" in recording.calls[0].text
 
 
-async def test_download_menu_button_sends_prompt(db_engine, bot, dispatcher, mock_arq_pool) -> None:
-    from app.i18n.translator import Translator
+# --- Result-action callback (Find song / Extract MP3 / Other) ----------
+
+
+async def test_result_action_find_reuses_file_id_via_recognize_job(db_engine, bot, dispatcher, mock_arq_pool, fake_redis) -> None:
+    from app.bot.callback_data import ResultActionCallback
+    from app.bot.result_cache import ResultActionContext, store_result_context
 
     b, recording = bot
-    label = Translator("en").t("menu_download_media")
-    await dispatcher.feed_update(b, _text_update(label))
+    await store_result_context(
+        fake_redis,
+        "rtok1",
+        ResultActionContext(user_id=7, file_id="FILEID99", source_url="https://x", platform="tiktok", probe_job_id="pj"),
+    )
+
+    data = ResultActionCallback(token="rtok1", action="find").pack()
+    await dispatcher.feed_update(b, _callback_update(data, user_id=7))
+
+    mock_arq_pool.enqueue_job.assert_called_once()
+    args, kwargs = mock_arq_pool.enqueue_job.call_args
+    assert args[0] == "recognize_job"
+    assert kwargs["source_file_id"] == "FILEID99"
+
+
+async def test_result_action_mp3_reuses_file_id_via_convert_job(db_engine, bot, dispatcher, mock_arq_pool, fake_redis) -> None:
+    from app.bot.callback_data import ResultActionCallback
+    from app.bot.result_cache import ResultActionContext, store_result_context
+
+    b, _ = bot
+    await store_result_context(
+        fake_redis,
+        "rtok2",
+        ResultActionContext(user_id=7, file_id="FILEID77", source_url="https://x", platform="tiktok", probe_job_id="pj"),
+    )
+
+    data = ResultActionCallback(token="rtok2", action="mp3").pack()
+    await dispatcher.feed_update(b, _callback_update(data, user_id=7))
+
+    args, kwargs = mock_arq_pool.enqueue_job.call_args
+    assert args[0] == "convert_job"
+    assert kwargs["source_file_id"] == "FILEID77"
+
+
+async def test_result_action_other_shows_format_keyboard(db_engine, bot, dispatcher, mock_arq_pool, fake_redis) -> None:
+    from app.bot.callback_data import ResultActionCallback
+    from app.bot.result_cache import ResultActionContext, store_result_context
+
+    b, recording = bot
+    probe = _sample_probe(n_images=1)
+    await store_probe_result(fake_redis, "pjOther", probe)
+    await store_result_context(
+        fake_redis,
+        "rtok3",
+        ResultActionContext(user_id=7, file_id="F", source_url="https://x", platform="pinterest", probe_job_id="pjOther"),
+    )
+
+    data = ResultActionCallback(token="rtok3", action="other").pack()
+    await dispatcher.feed_update(b, _callback_update(data, user_id=7))
 
     mock_arq_pool.enqueue_job.assert_not_called()
-    assert len(recording.calls) == 1
+    # A message with a format keyboard is sent.
+    send_calls = [c for c in recording.calls if c.__class__.__name__ == "SendMessage"]
+    assert send_calls and send_calls[-1].reply_markup is not None
+
+
+async def test_result_action_rejected_for_wrong_user(db_engine, bot, dispatcher, mock_arq_pool, fake_redis) -> None:
+    from app.bot.callback_data import ResultActionCallback
+    from app.bot.result_cache import ResultActionContext, store_result_context
+
+    b, _ = bot
+    await store_result_context(
+        fake_redis,
+        "rtok4",
+        ResultActionContext(user_id=7, file_id="F", source_url="https://x", platform="tiktok", probe_job_id="pj"),
+    )
+
+    data = ResultActionCallback(token="rtok4", action="find").pack()
+    await dispatcher.feed_update(b, _callback_update(data, user_id=999))  # different user
+
+    mock_arq_pool.enqueue_job.assert_not_called()
+
+
+async def test_result_action_expired_context_shows_alert(db_engine, bot, dispatcher, mock_arq_pool) -> None:
+    from app.bot.callback_data import ResultActionCallback
+
+    b, recording = bot
+    data = ResultActionCallback(token="never", action="find").pack()
+    await dispatcher.feed_update(b, _callback_update(data, user_id=7))
+
+    mock_arq_pool.enqueue_job.assert_not_called()
+    answer_calls = [c for c in recording.calls if c.__class__.__name__ == "AnswerCallbackQuery"]
+    assert answer_calls and answer_calls[0].show_alert is True
 
 
 # --- Format-selection callback -----------------------------------------

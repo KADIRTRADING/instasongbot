@@ -94,6 +94,14 @@ services:
     command: ["arq", "app.workers.settings.WorkerSettings"]
     volumes:
       - bot_data:/data
+      # OPTIONAL operator-supplied cookies for platforms that block anonymous
+      # access from datacenter IPs (Instagram in particular — see
+      # ARCHITECTURE.md §8 and .env.example's cookie notes). Mount your
+      # exported cookies.txt READ-ONLY (:ro) and point INSTAGRAM_COOKIES_FILE
+      # (and/or YTDLP_COOKIES_FILE) in .env at the in-container path below.
+      # The worker is what actually downloads, so the mount belongs here.
+      # Uncomment and adjust the host path to enable:
+      # - ./secrets/instagram_cookies.txt:/data/cookies/instagram_cookies.txt:ro
     depends_on:
       postgres:
         condition: service_healthy

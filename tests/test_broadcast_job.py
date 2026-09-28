@@ -69,6 +69,8 @@ async def fake_redis():
 def worker_ctx(settings: Settings, fake_redis, tmp_path) -> WorkerContext:
     settings.WORKDIR = str(tmp_path)
     mock_bot = AsyncMock()
+    from app.services.search.factory import get_search_provider
+
     return WorkerContext(
         settings=settings,
         bot=mock_bot,
@@ -78,6 +80,7 @@ def worker_ctx(settings: Settings, fake_redis, tmp_path) -> WorkerContext:
         download_manager=DownloadManager(settings),
         media_tools=MediaTools(timeout_seconds=60),
         storage_backend=get_storage_backend(settings),
+        search_provider=get_search_provider(settings),
     )
 
 

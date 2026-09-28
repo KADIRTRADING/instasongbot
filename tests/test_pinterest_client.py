@@ -15,8 +15,8 @@ import respx
 
 from app.constants import MediaType
 from app.services.downloader.errors import ContentNotFoundError, PrivateContentError
-from app.services.downloader.pinterest_client import PinterestClient
 from app.services.downloader.models import MediaFormat, ProbeResult
+from app.services.downloader.pinterest_client import PinterestClient
 
 FIXTURES = Path(__file__).parent / "fixtures"
 RESOURCE_URL = "https://www.pinterest.com/resource/PinResource/get/"

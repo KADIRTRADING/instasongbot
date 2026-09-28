@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, patch
 import fakeredis.aioredis
 import pytest
 
-from app.bot.handlers import admin, convert, core, download, recognize
+from app.bot.handlers import admin, convert, core, download, recognize, search
 from app.config import Settings
 from app.db import session as db_session_module
 
@@ -31,7 +31,7 @@ async def reset_db_engine():
 @pytest.fixture(autouse=True)
 def reset_router_parents():
     yield
-    for module in (admin, core, recognize, convert, download):
+    for module in (admin, core, recognize, convert, download, search):
         module.router._parent_router = None
 
 

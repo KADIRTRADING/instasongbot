@@ -17,6 +17,7 @@ import yt_dlp
 from app.constants import MediaType, Platform
 from app.services.downloader.errors import (
     ContentNotFoundError,
+    LoginRequiredError,
     PrivateContentError,
     UnsupportedURLError,
 )
@@ -139,7 +140,12 @@ async def test_probe_playlist_takes_first_entry() -> None:
 @pytest.mark.parametrize(
     "message,expected_exc",
     [
-        ("ERROR: [Instagram] abc: Instagram sent an empty media response. login required", PrivateContentError),
+        # "login required" (Instagram's combined anonymous-block message) is
+        # DELIBERATELY LoginRequiredError now, NOT PrivateContentError — a
+        # public reel blocked anonymously is not "private" (the fixed bug).
+        ("ERROR: [Instagram] abc: Requested content is not available, rate-limit reached or login required", LoginRequiredError),
+        # A genuinely-private marker still maps to PrivateContentError.
+        ("ERROR: [Instagram] abc: This account is private", PrivateContentError),
         ("ERROR: [twitter] 123: No video could be found in this tweet", ContentNotFoundError),
         ("ERROR: [generic] Unsupported URL: https://example.com/x", UnsupportedURLError),
         ("ERROR: some totally unexpected failure", Exception),
@@ -148,7 +154,7 @@ async def test_probe_playlist_takes_first_entry() -> None:
 def test_classify_error(message: str, expected_exc: type[Exception]) -> None:
     from app.services.downloader.errors import DownloadFailedError
 
-    result = YtDlpClient._classify_error(message)
+    result = YtDlpClient()._classify_error(message)
     if expected_exc is Exception:
         assert isinstance(result, DownloadFailedError)
     else:

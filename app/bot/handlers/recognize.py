@@ -1,11 +1,11 @@
-"""Music recognition handler: accepts a voice message, audio file, or video
-(as an upload) and enqueues a `recognize_job`. See ARCHITECTURE.md §4.1.
+"""Music recognition handler: accepts a voice message or audio file and
+enqueues a `recognize_job`. See ARCHITECTURE.md §4.1.
 
-Content-type routing, not FSM: any voice/audio/video message triggers this,
-regardless of whether the user tapped "Find Music" first — matching the
-spec's "just send me a link or a voice clip" flexibility (see also
-handlers/download.py and handlers/convert.py, which route on URL-in-text and
-are mutually exclusive with this file's content types).
+Fully automatic content routing, no menu: any voice/audio message triggers
+recognition directly (see also handlers/download.py for URL-in-text
+auto-download, handlers/convert.py for uploaded-video auto-recognition, and
+handlers/search.py for plain-text music search — all mutually exclusive by
+content type).
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ from aiogram.types import Audio, Message, Voice
 from arq.connections import ArqRedis
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.bot.keyboards.menu import MenuButtonFilter
 from app.config import Settings
 from app.constants import JobType
 from app.db.repositories import JobRepository
@@ -25,18 +24,12 @@ from app.i18n.translator import Translator
 
 router = Router(name="recognize")
 
-# NOTE: video uploads are deliberately NOT handled here, even though a video
-# can also be identified. A video upload gets the explicit 3-way choice
-# (identify song / extract audio / nothing else needed, since the user
-# already has the original) via handlers/convert.py + VideoActionCallback —
-# silently auto-recognizing every uploaded video would remove that choice.
-# Voice/audio messages have no such ambiguity: recognition is their only
-# sensible action, so they're handled directly here.
-
-
-@router.message(MenuButtonFilter("menu_find_music"))
-async def prompt_find_music(message: Message, translator: Translator) -> None:
-    await message.answer(translator.t("ask_send_audio_for_recognition"))
+# NOTE: video uploads are handled in handlers/convert.py, not here. In the
+# automatic UX an uploaded video is auto-recognized AND offered an "Extract
+# MP3" action in one step (see convert.py's handle_video_upload), so it needs
+# the result-action keyboard machinery that lives alongside the convert flow.
+# Voice/audio messages have no such follow-up ambiguity — recognition is their
+# only sensible action — so they're handled directly here.
 
 
 @router.message(F.voice | F.audio)

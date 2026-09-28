@@ -110,6 +110,7 @@ def mock_arq_pool() -> AsyncMock:
 @pytest.fixture
 def dispatcher(settings: Settings, mock_arq_pool: AsyncMock) -> Dispatcher:
     dp = Dispatcher()
+    dp["settings"] = settings  # matches build_dispatcher(); the Bot Settings handlers need it
     dp["arq_pool"] = mock_arq_pool
     dp.update.outer_middleware(DbSessionMiddleware())
     dp.update.outer_middleware(UserContextMiddleware(settings))
@@ -159,15 +160,8 @@ async def test_admin_command_shows_menu_for_admin(db_engine, bot, dispatcher) ->
     assert sent.__class__.__name__ == "SendMessage"
     assert sent.text == Translator("uz").t("admin_menu_title")
     assert sent.reply_markup is not None
-    assert len(sent.reply_markup.inline_keyboard) == 6  # captions/buttons/platforms/stats/limits/broadcast
-
-
-async def test_admin_menu_button_shows_menu_for_admin(db_engine, bot, dispatcher) -> None:
-    b, recording = bot
-    label = Translator("en").t("menu_admin")
-    await dispatcher.feed_update(b, _message_update(label))
-
-    assert len(recording.calls) == 1
+    # captions/buttons/platforms/stats/limits/settings/broadcast
+    assert len(sent.reply_markup.inline_keyboard) == 7
 
 
 async def test_non_admin_callback_ignored(db_engine, bot, dispatcher) -> None:
@@ -513,3 +507,63 @@ async def test_broadcast_confirm_without_prior_text_uses_empty_string(db_engine,
     await dispatcher.feed_update(b, _callback_update("adm:bcastconfirm", update_id=2))
 
     mock_arq_pool.enqueue_job.assert_not_called()
+
+
+
+# --- Bot settings (auto quality / result buttons) ----------------------------
+
+
+async def test_settings_menu_shows_current_quality_and_buttons(db_engine, bot, dispatcher) -> None:
+    b, recording = bot
+    await dispatcher.feed_update(b, _callback_update("adm:settings"))
+
+    edited = [c for c in recording.calls if c.__class__.__name__ == "EditMessageText"]
+    assert len(edited) == 1
+    # Two setting rows + a back row.
+    assert len(edited[0].reply_markup.inline_keyboard) == 3
+
+
+async def test_pick_quality_shows_all_options(db_engine, bot, dispatcher) -> None:
+    b, recording = bot
+    await dispatcher.feed_update(b, _callback_update("adm:setquality"))
+
+    edited = [c for c in recording.calls if c.__class__.__name__ == "EditMessageText"]
+    assert edited[0].text == Translator("uz").t("admin_pick_quality")
+    # best/720/480/audio + back
+    assert len(edited[0].reply_markup.inline_keyboard) == 5
+
+
+async def test_selecting_quality_persists_to_bot_settings(db_engine, bot, dispatcher) -> None:
+    from app.bot.settings_store import get_auto_video_quality
+
+    b, _ = bot
+    await dispatcher.feed_update(b, _callback_update("adm:quality:480"))
+
+    sm = db_session_module.get_sessionmaker()
+    async with sm() as session:
+        assert await get_auto_video_quality(session, env_default="best") == "480"
+
+
+async def test_toggling_result_buttons_flips_and_persists(db_engine, bot, dispatcher) -> None:
+    from app.bot.settings_store import get_show_result_buttons
+
+    b, _ = bot
+    # default is True -> toggling once turns it off
+    await dispatcher.feed_update(b, _callback_update("adm:togglebtns"))
+
+    sm = db_session_module.get_sessionmaker()
+    async with sm() as session:
+        assert await get_show_result_buttons(session) is False
+
+
+async def test_non_admin_cannot_change_settings(db_engine, bot, dispatcher) -> None:
+    from app.bot.settings_store import get_auto_video_quality
+
+    b, recording = bot
+    await dispatcher.feed_update(b, _callback_update("adm:quality:audio", user_id=NON_ADMIN_ID))
+
+    assert recording.calls == []  # router-level is_admin gate blocked it
+    sm = db_session_module.get_sessionmaker()
+    async with sm() as session:
+        # Unchanged (no override written).
+        assert await get_auto_video_quality(session, env_default="best") == "best"

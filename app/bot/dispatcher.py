@@ -45,7 +45,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from arq.connections import ArqRedis
 
 from app.bot.error_handler import handle_unexpected_error
-from app.bot.handlers import admin, convert, core, download, recognize
+from app.bot.handlers import admin, convert, core, download, recognize, search
 from app.bot.middlewares.arq_pool import ArqPoolMiddleware
 from app.bot.middlewares.db_session import DbSessionMiddleware
 from app.bot.middlewares.logging import LoggingMiddleware
@@ -79,13 +79,28 @@ def _include_routers(dp: Dispatcher) -> None:
 
     admin_router's own internal gating (`is_admin` router-level filter) means
     registering it first costs nothing for non-admins: their updates simply
-    fall through to core/recognize/download/convert exactly as before.
+    fall through to core/recognize/download/convert/search exactly as before.
+
+    search_router is registered LAST: its message handler claims ANY
+    non-command, non-URL plain text as a music-search query (the broadest text
+    matcher here). Everything narrower — admin FSM text input, /commands, and
+    URL-in-text downloads — must get first refusal, so search only ever sees
+    text nobody else wanted. This is the mirror image of the admin-first
+    reasoning above.
     """
     dp.include_router(admin.router)
     dp.include_router(core.router)
     dp.include_router(recognize.router)
     dp.include_router(convert.router)
     dp.include_router(download.router)
+    # search.router is registered LAST on purpose: its message handler treats
+    # ANY non-command, non-URL plain text as a music-search query, which is the
+    # broadest text matcher in the app. Registering it after admin (FSM text
+    # input), core (commands), and download (URL-in-text) guarantees those
+    # narrower, higher-priority routes win first and only genuinely
+    # unclaimed plain text becomes a search — see this module's routing-order
+    # docstring above and handlers/search.py's `_is_search_query`.
+    dp.include_router(search.router)
 
 
 def _include_middlewares(dp: Dispatcher, settings: Settings, rate_limiter: RateLimiter, arq_pool: ArqRedis) -> None:

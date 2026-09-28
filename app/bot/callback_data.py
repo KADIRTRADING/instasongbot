@@ -35,38 +35,100 @@ class DownloadFormatCallback:
         return packed
 
     @classmethod
-    def unpack(cls, data: str) -> "DownloadFormatCallback":
+    def unpack(cls, data: str) -> DownloadFormatCallback:
         prefix, probe_job_id, index_raw = _split(data, expected_parts=3, expected_prefix=cls.PREFIX)
         format_index: int | str = index_raw if index_raw == "all" else int(index_raw)
         return cls(probe_job_id=probe_job_id, format_index=format_index)
 
 
 @dataclass(frozen=True)
-class VideoActionCallback:
-    """`ref_id` is a lookup key, not the media itself (Telegram file_ids are
-    80+ bytes, well over the 64-byte callback_data ceiling — see module
-    docstring). What it references depends on `source`:
-      - source="link": ref_id is a probe_job_id, resolved via
-        app/bot/probe_cache.py against a previously-probed URL.
-      - source="upload": ref_id is an upload_job_id, resolved via
-        app/bot/upload_cache.py against a Telegram file_id the user sent.
+class SearchSelectCallback:
+    """User tapped a numbered result in a search's result list. `token` is a
+    short search-session key (see app/bot/search_cache.py), `index` is the
+    ABSOLUTE index into the full ordered result list (not the page-relative
+    one), so it stays valid regardless of which page it was tapped from.
     """
 
-    ref_id: str
-    action: str  # "identify" | "audio" | "video"
-    source: str  # "link" | "upload"
+    token: str
+    index: int
 
-    PREFIX = "va"
+    PREFIX = "ss"
 
     def pack(self) -> str:
-        packed = _SEP.join([self.PREFIX, self.ref_id, self.action, self.source])
+        packed = _SEP.join([self.PREFIX, self.token, str(self.index)])
         _assert_fits(packed)
         return packed
 
     @classmethod
-    def unpack(cls, data: str) -> "VideoActionCallback":
-        _, ref_id, action, source = _split(data, expected_parts=4, expected_prefix=cls.PREFIX)
-        return cls(ref_id=ref_id, action=action, source=source)
+    def unpack(cls, data: str) -> SearchSelectCallback:
+        _, token, index_raw = _split(data, expected_parts=3, expected_prefix=cls.PREFIX)
+        return cls(token=token, index=int(index_raw))
+
+
+@dataclass(frozen=True)
+class SearchPageCallback:
+    """Previous/Next navigation within a search's result list. `page` is the
+    zero-based page index to show next.
+    """
+
+    token: str
+    page: int
+
+    PREFIX = "sp"
+
+    def pack(self) -> str:
+        packed = _SEP.join([self.PREFIX, self.token, str(self.page)])
+        _assert_fits(packed)
+        return packed
+
+    @classmethod
+    def unpack(cls, data: str) -> SearchPageCallback:
+        _, token, page_raw = _split(data, expected_parts=3, expected_prefix=cls.PREFIX)
+        return cls(token=token, page=int(page_raw))
+
+
+@dataclass(frozen=True)
+class SearchCancelCallback:
+    """User dismissed a search result list."""
+
+    token: str
+
+    PREFIX = "sx"
+
+    def pack(self) -> str:
+        packed = _SEP.join([self.PREFIX, self.token])
+        _assert_fits(packed)
+        return packed
+
+    @classmethod
+    def unpack(cls, data: str) -> SearchCancelCallback:
+        _, token = _split(data, expected_parts=2, expected_prefix=cls.PREFIX)
+        return cls(token=token)
+
+
+@dataclass(frozen=True)
+class ResultActionCallback:
+    """A follow-up action offered under an auto-downloaded social video:
+    "Find this song" / "Extract MP3" / "Other quality/options". `token`
+    references a ResultActionContext (see app/bot/result_cache.py) that holds
+    the already-delivered video's file_id + source URL, so the action reuses
+    the media rather than refetching it.
+    """
+
+    token: str
+    action: str  # "find" | "mp3" | "other"
+
+    PREFIX = "ra"
+
+    def pack(self) -> str:
+        packed = _SEP.join([self.PREFIX, self.token, self.action])
+        _assert_fits(packed)
+        return packed
+
+    @classmethod
+    def unpack(cls, data: str) -> ResultActionCallback:
+        _, token, action = _split(data, expected_parts=3, expected_prefix=cls.PREFIX)
+        return cls(token=token, action=action)
 
 
 @dataclass(frozen=True)
@@ -79,7 +141,7 @@ class LanguageCallback:
         return _SEP.join([self.PREFIX, self.language])
 
     @classmethod
-    def unpack(cls, data: str) -> "LanguageCallback":
+    def unpack(cls, data: str) -> LanguageCallback:
         _, language = _split(data, expected_parts=2, expected_prefix=cls.PREFIX)
         return cls(language=language)
 

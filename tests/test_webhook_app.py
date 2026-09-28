@@ -17,7 +17,7 @@ from aiogram.client.session.base import BaseSession
 from aiogram.methods import TelegramMethod
 from aiohttp.test_utils import TestClient, TestServer
 
-from app.bot.handlers import admin, convert, core, download, recognize
+from app.bot.handlers import admin, convert, core, download, recognize, search
 from app.config import Settings
 from app.db import session as db_session_module
 from app.db.base import Base
@@ -54,7 +54,7 @@ def reset_router_parents():
     # module-level router singleton -- see tests/test_dispatcher.py for why
     # this reset is required between tests.
     yield
-    for module in (admin, core, recognize, convert, download):
+    for module in (admin, core, recognize, convert, download, search):
         module.router._parent_router = None
 
 

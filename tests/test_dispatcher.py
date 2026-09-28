@@ -25,7 +25,7 @@ from aiogram.types import User as TgUser
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.bot.dispatcher import build_bot, build_dispatcher
-from app.bot.handlers import admin, convert, core, download, recognize
+from app.bot.handlers import admin, convert, core, download, recognize, search
 from app.bot.states import AdminButtonStates
 from app.config import Settings
 from app.db import session as db_session_module
@@ -76,7 +76,7 @@ def reset_router_parents():
     # every test needs a clean slate (see other handler test files for the
     # same pattern, applied there to one router at a time).
     yield
-    for module in (admin, core, recognize, convert, download):
+    for module in (admin, core, recognize, convert, download, search):
         module.router._parent_router = None
 
 
@@ -215,7 +215,18 @@ async def test_regular_user_url_still_reaches_download_router(db_engine, bot, di
 
     mock_arq_pool.enqueue_job.assert_called_once()
     args, _kwargs = mock_arq_pool.enqueue_job.call_args
-    assert args[0] == "probe_job"
+    assert args[0] == "auto_download_job"
+
+
+async def test_plain_text_routes_to_search(db_engine, bot, dispatcher, mock_arq_pool) -> None:
+    """A non-command, non-URL plain-text message is a music-search query,
+    handled by the LAST-registered search router (see dispatcher docstring)."""
+    b, _ = bot
+    await dispatcher.feed_update(b, _message_update("dua lipa levitating", user_id=NON_ADMIN_ID, update_id=1))
+
+    mock_arq_pool.enqueue_job.assert_called_once()
+    args, _kwargs = mock_arq_pool.enqueue_job.call_args
+    assert args[0] == "search_job"
 
 
 # --- Middleware wiring: throttling is genuinely active as an inner mw ------

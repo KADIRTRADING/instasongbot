@@ -26,7 +26,7 @@ from app.services.downloader.errors import (
 )
 from app.services.downloader.models import DownloadedFile, ProbeResult
 from app.services.downloader.pinterest_client import PinterestClient
-from app.services.downloader.url_utils import assert_public_http_url, detect_platform
+from app.services.downloader.url_utils import assert_public_http_url, detect_platform, normalize_url
 from app.services.downloader.ytdlp_client import YtDlpClient
 
 _STREAM_CHUNK_SIZE = 1024 * 256
@@ -43,6 +43,11 @@ class DownloadManager:
         )
 
     async def probe(self, url: str) -> ProbeResult:
+        # Normalize first (strip share/tracking params, canonicalize Instagram
+        # /reels/->/reel/) so the same content shared different ways behaves
+        # identically and the extractor sees the cleanest possible URL. Safe
+        # for any input — a non-URL or unknown host passes through unchanged.
+        url = normalize_url(url)
         platform = detect_platform(url)
         if platform is None:
             raise UnsupportedURLError(f"No supported platform recognized for this link: {url}")

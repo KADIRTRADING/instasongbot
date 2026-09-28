@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from app.bot.callback_data import DownloadFormatCallback, VideoActionCallback
+from app.bot.callback_data import DownloadFormatCallback
 from app.constants import MediaType
 from app.i18n.translator import Translator
 from app.services.downloader.models import ProbeResult
@@ -42,37 +42,4 @@ def build_format_keyboard(probe_job_id: str, probe: ProbeResult, translator: Tra
             ]
         )
 
-    return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def build_video_action_keyboard(ref_id: str, translator: Translator, *, source: str) -> InlineKeyboardMarkup:
-    """The video-tools choices (see ARCHITECTURE.md §4.3): identify the song,
-    extract audio, and — only when `source == "link"` — download the
-    original video. For an uploaded file (`source == "upload"`), "download
-    the original" is omitted: the user already has that exact file, so
-    offering to send it back to them is pointless.
-    """
-    rows = [
-        [
-            InlineKeyboardButton(
-                text=translator.t("action_identify_song"),
-                callback_data=VideoActionCallback(ref_id=ref_id, action="identify", source=source).pack(),
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=translator.t("action_extract_audio"),
-                callback_data=VideoActionCallback(ref_id=ref_id, action="audio", source=source).pack(),
-            )
-        ],
-    ]
-    if source == "link":
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text=translator.t("action_download_original"),
-                    callback_data=VideoActionCallback(ref_id=ref_id, action="video", source=source).pack(),
-                )
-            ]
-        )
     return InlineKeyboardMarkup(inline_keyboard=rows)

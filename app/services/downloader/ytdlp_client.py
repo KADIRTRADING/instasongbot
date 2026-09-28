@@ -12,32 +12,66 @@ extraction problems; it surfaces yt-dlp's real error message.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 from typing import Any
 
 import yt_dlp
 
 from app.constants import MediaType, Platform
+from app.logging_conf import get_logger
 from app.services.downloader.errors import (
     ContentNotFoundError,
     DownloadFailedError,
     DownloadTimeoutError,
     FileTooLargeError,
+    LoginRequiredError,
     PrivateContentError,
+    RateLimitedError,
     UnsupportedURLError,
 )
 from app.services.downloader.models import DownloadedFile, MediaFormat, ProbeResult
+
+logger = get_logger(__name__)
 
 # Substrings from yt-dlp's own ExtractorError messages that reliably indicate
 # a specific failure category across the platforms we support. yt-dlp doesn't
 # expose a structured error code, so pattern-matching its (stable, documented)
 # English messages is the accepted approach other projects use too.
+#
+# IMPORTANT (see task-2 Instagram diagnosis / ARCHITECTURE §8): "rate-limit
+# reached" and "login required" are DELIBERATELY NOT in _PRIVATE_MARKERS.
+# Instagram's anonymous-access failure is a single combined message
+# "Requested content is not available, rate-limit reached or login required"
+# that fires for PUBLIC reels blocked by IP rate-limiting — mapping it to
+# PrivateContentError told users a public reel was "private", which was the
+# reported bug. Those markers are handled by _LOGIN_REQUIRED_MARKERS below and
+# classified as LoginRequiredError (a distinct, honest state), not private.
 _PRIVATE_MARKERS = (
-    "private",
+    "this account is private",
+    "private account",
+    "private video",
+    "private and can only be accessed",
+    "friends only",
+    "not authorized to view",
+)
+# The "needs an authenticated session / blocked anonymously" family. yt-dlp
+# conflates rate-limit vs login-required vs (sometimes) unavailable into one
+# message for Instagram, so we cannot honestly split them further; we surface
+# a single "couldn't fetch anonymously (rate-limited or login required)" state.
+_LOGIN_REQUIRED_MARKERS = (
     "login required",
-    "requires authentication",
+    "requested content is not available",
     "rate-limit reached",
-    "not authorized",
+    "requires authentication",
+    "use --cookies",
+    "sign in to confirm",
+    "log in to view",
+)
+_RATE_LIMIT_MARKERS = (
+    "http error 429",
+    "too many requests",
+    "rate limit exceeded",
 )
 _NOT_FOUND_MARKERS = (
     "unavailable",
@@ -47,13 +81,14 @@ _NOT_FOUND_MARKERS = (
     "no video could be found",
     "no video formats found",
     "empty media response",
+    "this post is no longer available",
 )
 
 
 class YtDlpClient:
     def __init__(self, cookies_file: str = "", instagram_cookies_file: str = "", timeout_seconds: int = 60) -> None:
-        self._cookies_file = cookies_file or None
-        self._instagram_cookies_file = instagram_cookies_file or None
+        self._cookies_file = _validate_cookie_path(cookies_file, label="YTDLP_COOKIES_FILE")
+        self._instagram_cookies_file = _validate_cookie_path(instagram_cookies_file, label="INSTAGRAM_COOKIES_FILE")
         self._timeout = timeout_seconds
 
     def _base_opts(self, platform: Platform) -> dict[str, Any]:
@@ -66,12 +101,21 @@ class YtDlpClient:
         }
         # Instagram gets its own cookie file if configured (a session scoped
         # narrowly to Instagram is lower-risk than reusing one global cookie
-        # jar across every platform).
+        # jar across every platform). Both paths were already existence-checked
+        # in __init__ (a missing file becomes None), so we never hand yt-dlp a
+        # nonexistent cookiefile — which would otherwise raise a raw
+        # "[Errno 2] No such file or directory" that no error classifier could
+        # translate (a bug caught during the task-2 diagnosis).
         if platform == Platform.INSTAGRAM and self._instagram_cookies_file:
             opts["cookiefile"] = self._instagram_cookies_file
         elif self._cookies_file:
             opts["cookiefile"] = self._cookies_file
         return opts
+
+    def _has_cookies_for(self, platform: Platform) -> bool:
+        if platform == Platform.INSTAGRAM and self._instagram_cookies_file:
+            return True
+        return bool(self._cookies_file)
 
     async def probe(self, url: str, platform: Platform) -> ProbeResult:
         try:
@@ -88,7 +132,7 @@ class YtDlpClient:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False)
         except yt_dlp.utils.DownloadError as exc:
-            raise self._classify_error(str(exc)) from exc
+            raise self._classify_error(str(exc), platform) from exc
         if info is None:
             raise ContentNotFoundError("No media info returned for this URL")
         # Playlists/multi-entry results: take the first real entry, since the
@@ -100,11 +144,26 @@ class YtDlpClient:
             info = entries[0]
         return info
 
-    @staticmethod
-    def _classify_error(message: str) -> Exception:
+    def _classify_error(self, message: str, platform: Platform | None = None) -> Exception:
+        """Map a yt-dlp error message to our error taxonomy.
+
+        Order matters: a genuinely-private marker ("this account is private")
+        wins over the login-required family, and the login-required family
+        (Instagram's combined "not available / rate-limited / login required"
+        message) is classified as LoginRequiredError — NOT PrivateContentError
+        — so a public-but-IP-blocked reel is never mislabeled "private". When
+        that happens on Instagram and the operator has NOT supplied a cookies
+        file, the message stays as LoginRequiredError so the user is told
+        (honestly) that anonymous access is currently blocked and cookies
+        would fix it — never that the content is private.
+        """
         lowered = message.lower()
         if any(marker in lowered for marker in _PRIVATE_MARKERS):
             return PrivateContentError(message)
+        if any(marker in lowered for marker in _RATE_LIMIT_MARKERS):
+            return RateLimitedError(message)
+        if any(marker in lowered for marker in _LOGIN_REQUIRED_MARKERS):
+            return LoginRequiredError(message)
         if any(marker in lowered for marker in _NOT_FOUND_MARKERS):
             return ContentNotFoundError(message)
         if "unsupported url" in lowered:
@@ -227,7 +286,7 @@ class YtDlpClient:
             message = str(exc)
             if "max-filesize" in message.lower() or "does not pass filesize filter" in message.lower():
                 raise FileTooLargeError(size_mb=0.0, limit_mb=max_bytes // (1024 * 1024)) from exc
-            raise self._classify_error(message) from exc
+            raise self._classify_error(message, platform) from exc
 
         if info is None:
             raise DownloadFailedError("yt-dlp reported success but returned no info")
@@ -262,3 +321,23 @@ class YtDlpClient:
             ext=final_path.suffix.lstrip("."),
             size_bytes=size_bytes,
         )
+
+
+def _validate_cookie_path(path: str, *, label: str) -> str | None:
+    """Return `path` only if it points at an existing, readable file; else None.
+
+    Handing yt-dlp a `cookiefile` that doesn't exist makes it raise a raw
+    `[Errno 2] No such file or directory` on EVERY request for that platform —
+    an unclassified crash the error taxonomy can't translate (caught in the
+    task-2 diagnosis). An operator who sets INSTAGRAM_COOKIES_FILE but whose
+    Docker read-only mount is missing/misconfigured should degrade to the
+    normal anonymous path (and get the honest "login required" message),
+    NOT have every Instagram request explode. We log a warning so the
+    misconfiguration is visible in logs.
+    """
+    if not path:
+        return None
+    if os.path.isfile(path):
+        return path
+    logger.warning("cookie_file_not_found", label=label, path=path)
+    return None

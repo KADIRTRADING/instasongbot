@@ -14,6 +14,7 @@ from app.config import Settings
 from app.services.downloader.manager import DownloadManager
 from app.services.media.ffmpeg_tools import MediaTools
 from app.services.recognition.base import MusicRecognitionProvider
+from app.services.search.base import MusicSearchProvider
 from app.services.storage.base import StorageBackend
 
 
@@ -27,3 +28,4 @@ class WorkerContext:
     download_manager: DownloadManager
     media_tools: MediaTools
     storage_backend: StorageBackend
+    search_provider: MusicSearchProvider

@@ -115,7 +115,7 @@ def _callback_update(data: str, *, user_id: int = 42, update_id: int = 1) -> Upd
 # --- /start -----------------------------------------------------------
 
 
-async def test_start_command_sends_welcome_with_name_and_menu(db_engine, bot, dispatcher) -> None:
+async def test_start_command_sends_welcome_with_name_and_no_menu(db_engine, bot, dispatcher) -> None:
     b, recording = bot
     await dispatcher.feed_update(b, _message_update("/start"))
 
@@ -123,7 +123,8 @@ async def test_start_command_sends_welcome_with_name_and_menu(db_engine, bot, di
     sent = recording.calls[0]
     assert sent.__class__.__name__ == "SendMessage"
     assert "Alice" in sent.text
-    assert sent.reply_markup is not None  # main menu keyboard attached
+    # Menu-free UX: /start attaches NO persistent reply keyboard.
+    assert sent.reply_markup is None
 
 
 async def test_start_command_creates_user_row_with_default_language(db_engine, bot, dispatcher) -> None:
@@ -137,27 +138,7 @@ async def test_start_command_creates_user_row_with_default_language(db_engine, b
         assert user.language_code == "uz"  # DEFAULT_LANGUAGE
 
 
-async def test_start_command_shows_admin_button_for_admin_user(db_engine, bot, dispatcher) -> None:
-    b, recording = bot
-    await dispatcher.feed_update(b, _message_update("/start", user_id=777))  # matches settings.ADMIN_IDS
-
-    sent = recording.calls[0]
-    admin_translator = Translator("uz")
-    all_button_texts = [btn.text for row in sent.reply_markup.keyboard for btn in row]
-    assert admin_translator.t("menu_admin") in all_button_texts
-
-
-async def test_start_command_hides_admin_button_for_regular_user(db_engine, bot, dispatcher) -> None:
-    b, recording = bot
-    await dispatcher.feed_update(b, _message_update("/start", user_id=42))
-
-    sent = recording.calls[0]
-    admin_translator = Translator("uz")
-    all_button_texts = [btn.text for row in sent.reply_markup.keyboard for btn in row]
-    assert admin_translator.t("menu_admin") not in all_button_texts
-
-
-# --- /help and the Help menu button ------------------------------------
+# --- /help --------------------------------------------------------------
 
 
 async def test_help_command_sends_help_text(db_engine, bot, dispatcher) -> None:
@@ -165,20 +146,11 @@ async def test_help_command_sends_help_text(db_engine, bot, dispatcher) -> None:
     await dispatcher.feed_update(b, _message_update("/help"))
 
     assert len(recording.calls) == 1
-    assert "Find Music" in recording.calls[0].text or "🎵" in recording.calls[0].text
+    # Help text now describes the automatic routing, not menu items.
+    assert "🎵" in recording.calls[0].text or "song" in recording.calls[0].text.lower()
 
 
-@pytest.mark.parametrize("language", ["uz", "ru", "en"])
-async def test_help_menu_button_matches_in_every_language(db_engine, bot, dispatcher, language: str) -> None:
-    b, recording = bot
-    label = Translator(language).t("menu_help")
-    await dispatcher.feed_update(b, _message_update(label))
-
-    assert len(recording.calls) == 1
-    assert recording.calls[0].__class__.__name__ == "SendMessage"
-
-
-# --- /language and the Language menu button -----------------------------
+# --- /language ----------------------------------------------------------
 
 
 async def test_language_command_shows_language_keyboard(db_engine, bot, dispatcher) -> None:

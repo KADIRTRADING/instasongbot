@@ -92,45 +92,74 @@ never occupied by ffmpeg or a multi-second download.
 
 ## 4. Data flow per feature
 
-### 4.1 Find Music
-`voice/audio/video/document message` → handler checks size ≤ `MAX_TELEGRAM_FETCH_MB`
-(Bot API download ceiling, see §9) → downloads to a per-job temp dir → enqueues
-`recognize_job(file_path, source="upload")` → worker: `ffmpeg` trims to the first
-`RECOGNITION_CLIP_SECONDS` and transcodes to mp3 (small, fast upload to the provider)
-→ calls the configured `MusicRecognitionProvider` → on match, formats title/artist/
-album/cover art/links (Spotify/Apple Music/Deezer when the provider returns them) using
-the **audio** caption template; on no-match or low confidence, sends a clear
-"couldn't confidently identify this" message (never a fabricated guess) → deletes the
-temp file → updates the `jobs` row.
+**Routing overview (no menu).** The bot has no persistent reply-keyboard menu. Every
+incoming message is routed purely by its content, with a deliberate router-registration
+order (see `app/bot/dispatcher.py`): **admin** (FSM text input, gated on `is_admin`) →
+**core** (`/start`, `/help`, `/language`) → **recognize** (`F.voice | F.audio`) →
+**convert** (`F.video`) → **download** (text containing a supported URL) → **search**
+(any other non-command, non-URL plain text). The order matters because the search route
+claims the broadest text pattern, so it is registered LAST and only ever sees text no
+narrower route wanted.
 
-### 4.2 Download Media
-Any message containing a supported-platform URL (menu button optional, links work
-anywhere) → `url_utils.detect_platform()` classifies + validates (SSRF-safe: rejects
-non-http(s), private/loopback/link-local resolved IPs, unknown hosts) → enqueues a
-`probe_job` → worker calls `yt-dlp` (or the Pinterest client) in "extract info only,
-no download" mode → bot edits the progress message into an inline keyboard of real
-available options (resolutions / audio-only / each image in a carousel) built from the
-actual probe result, never a hard-coded list → user taps one → callback enqueues
-`download_job(format_id | image_index)` → worker streams the file to disk with a hard
-byte-cap (`MAX_DOWNLOAD_MB`), then:
-- size ≤ `TELEGRAM_DIRECT_UPLOAD_MB` → send directly (video/audio/photo, with the
-  admin's caption template + buttons for that media type);
-- size > that limit → upload to S3, generate a presigned URL valid for
-  `PRESIGNED_URL_TTL_SECONDS`, send that link instead (clearly labeled "secure,
-  expires in …");
+### 4.1 Recognition (voice / audio)
+`voice/audio message` → handler checks size ≤ `MAX_TELEGRAM_FETCH_MB` (Bot API download
+ceiling, see §9) → enqueues `recognize_job(source_file_id)` → worker downloads to a
+per-job temp dir, `ffmpeg` trims to the first `RECOGNITION_CLIP_SECONDS` and transcodes
+to mp3 → calls the configured `MusicRecognitionProvider` → on match, formats title/
+artist/album/cover art/links (Spotify/Apple Music/Deezer when the provider returns them);
+on no-match or low confidence, sends a clear "couldn't confidently identify this" message
+(never a fabricated guess) → deletes the temp file → updates the `jobs` row.
+
+### 4.2 Automatic media download (social link → video)
+Any message containing a supported-platform URL → the URL is `normalize_url()`-ed (share/
+tracking params stripped, Instagram `/reels/`→`/reel/` canonicalized) and classified +
+validated by `url_utils.detect_platform()` / `assert_public_http_url()` (SSRF-safe:
+rejects non-http(s), private/loopback/link-local resolved IPs, unknown hosts) → enqueues
+**`auto_download_job`**, which does everything in one job with **no format-selection
+step**: probe (`yt-dlp` / Pinterest client, info-only) → auto-pick ONE format by the
+admin-configured `auto_video_quality` (`best`/`720`/`480`/`audio`, see
+`services/downloader/quality.py`) → stream to disk with a hard byte-cap
+(`MAX_DOWNLOAD_MB`), then:
+- size ≤ `TELEGRAM_DIRECT_UPLOAD_MB` → send the video directly (with the admin's caption
+  template + buttons for that media type);
+- size > that limit → upload to storage, generate a time-limited link
+  (`PRESIGNED_URL_TTL_SECONDS`), send that instead (clearly labeled "secure, expires in …");
 - always deletes the local temp file in a `finally` block, regardless of outcome.
 
-Failure paths (private post, deleted content, unsupported link, provider rate-limited,
-download failed) map to distinct, translated error messages — see `services/downloader/errors.py`.
+On a successful single-video delivery, and when the admin `show_result_buttons` setting
+is on, optional inline actions are attached under the video — **🔎 Find this song**,
+**🎧 Extract MP3**, **⚙️ Other quality/options** — via a `ResultActionCallback`. These
+reuse the just-uploaded video's Telegram `file_id` (stashed in `result_cache`) so
+recognition / MP3 extraction **never refetch the source**; "Other options" re-shows the
+full explicit format keyboard from the cached probe result. A **multi-image carousel** is
+the one case NOT auto-collapsed: picking one image for the user would be wrong, so it
+still shows the "choose one / download all" image keyboard (`DownloadFormatCallback`).
 
-### 4.3 Convert Video → Audio
-Same probe step as §4.2. Once we know the source is a video (uploaded file or a link
-that resolves to video), the bot presents three explicit choices as inline buttons:
-**🎯 Identify song**, **🎧 Extract audio (MP3)**, **⬇️ Original video** — exactly the
-three actions the spec asks for, on the same probed source so we never download twice.
-"Extract audio" reuses `download_job` to fetch (or reuses the already-downloaded file
-for an upload) then pipes it through the same ffmpeg extraction used in §4.1, and can
-chain straight into "Identify song" on the extracted clip.
+Failure paths (private post, login-required/rate-limited, deleted content, unsupported
+link, download failed) map to distinct, translated error messages — see
+`services/downloader/errors.py` and §8's Instagram note.
+
+### 4.3 Uploaded video → auto-recognize + Extract MP3
+`F.video` upload → handler stashes the file_id in `result_cache` and enqueues
+`recognize_job(source_file_id, result_token=…)` → worker auto-identifies the music (same
+pipeline as §4.1) and attaches an **🎧 Extract MP3** button to the result (whether a song
+was found or not — graceful no-music handling). Tapping it reuses the same cached file_id
+via `convert_job` (ffmpeg audio extraction), never re-uploading. There is no "what would
+you like to do?" prompt — identification is automatic, MP3 is one optional tap.
+
+### 4.6 Music text search (song name / artist → numbered results)
+Any non-command, non-URL plain-text message → enqueues **`search_job`** → worker calls
+the configured `MusicSearchProvider` (Apple iTunes Search API by default — free, keyless)
+→ ranks results exact-match-first, originals before variants (remix/live/slowed/cover,
+detected from the track name) → caches the full ordered list in `search_cache` under a
+short user-bound token → renders page 1 as up to 10 numbered lines (artist · title ·
+version · duration) with **1-10 / Previous / Next / Cancel** inline buttons. All callbacks
+carry the token and are rejected if tapped by anyone other than the requester. Picking a
+number enqueues **`search_deliver_job`**, which is **honest about what it can deliver**:
+if the provider gives a legal preview clip, it sends a **clearly-labeled 30-second
+preview** audio file plus an "open full song" button to the official page; if there's no
+preview, it sends the official link alone. It never presents a preview as the full track,
+and never claims to have a track it can't legitimately redistribute.
 
 ### 4.4 Captions & buttons
 Every outgoing video/audio/photo goes through `services/captions/renderer.py`, which:
@@ -144,8 +173,12 @@ from `caption_buttons` rows (label + URL, admin-managed, ordered).
 Gated by a middleware that checks `message.from_user.id in settings.ADMIN_IDS`
 (env-sourced, hot-reloadable only by restart — see §11 on why this is intentional).
 Admin actions (edit caption template, add/remove button, toggle a platform, edit file
-size limits, view stats, broadcast) are plain FSM-driven handlers that write to the
+size limits, **set the automatic download quality**, **toggle the result-action
+buttons**, view stats, broadcast) are plain handlers that write to the
 `caption_templates` / `caption_buttons` / `platform_settings` / `bot_settings` tables;
+the two new **Bot Settings** knobs (`auto_video_quality`, `show_result_buttons`) live in
+the generic `bot_settings` KV table, so they needed no schema migration — the `.env`
+`AUTO_VIDEO_QUALITY` value is only the cold first-boot default the DB value overrides.
 the rest of the bot reads those tables (with a short in-process cache) so changes are
 live without a redeploy. Broadcast is itself an arq job (`broadcast_job`) so sending to
 thousands of users doesn't block anything and is resumable/observable via the
@@ -193,6 +226,24 @@ sync.
   production. Both providers share one interface (`MusicRecognitionProvider`), so
   switching is a config change, not a code change.
 
+### 6.1 Music text search (iTunes) — and its honesty constraint
+
+Text search is a **separate subsystem** from recognition (`services/search/`, provider
+interface `MusicSearchProvider`). The one live provider is the **Apple iTunes Search
+API** (`https://itunes.apple.com/search`, `entity=song`): free, keyless, no auth, and —
+critically — it returns for each track a real **~30-second preview clip** (`previewUrl`,
+served as `audio/x-m4p`, live-verified fetchable) plus an **official store link**
+(`trackViewUrl`) and artwork. It is live-tested end-to-end during development (real
+query, real results, real preview download).
+
+The honesty rule is baked into the data model (`SearchResult.is_downloadable_preview`)
+and the delivery job (§4.6): we send the **preview clearly labeled as a 30-second
+preview** with an official-link button, or — when no preview exists — the official link
+alone. We never present the preview as the complete song, and never imply we can hand
+over a full track we have no right to redistribute. Full-track download providers were
+deliberately **not** used, because none can be redistributed legally without licensing.
+Switching providers is a config change, not a code change (same interface as recognition).
+
 ## 7. Pinterest: how we actually support it (video + images + multi-image posts)
 
 Pinterest has no public download API and yt-dlp's own Pinterest support calls the same
@@ -221,7 +272,7 @@ are not and cannot be accessed by this bot.
 | Facebook (public videos) | yt-dlp | **Tested live** on a public video. |
 | YouTube | yt-dlp + bundled JS runtime (Deno) | **Tested live**; YouTube periodically requires a JS runtime for full format access, which the Docker image bundles. Age-restricted/private/members-only videos are out of scope (no login is performed). |
 | Pinterest | dedicated client, §7 | **Tested live** for image and video pins. |
-| Instagram | yt-dlp, optional cookies | **Implemented, currently degraded.** As of this writing, Instagram's anonymous (logged-out) access to its post API returns empty responses for yt-dlp (a live, currently-open upstream issue: `yt-dlp/yt-dlp#17275` — Instagram rolled out a new GraphQL API). We surface a clear "Instagram link couldn't be fetched right now" error rather than pretending it works. Operators can optionally supply `INSTAGRAM_COOKIES_FILE` (their own logged-in session, exported by the operator) to restore access at their own risk/ToS responsibility; we do not bundle or harvest credentials. |
+| Instagram | yt-dlp, optional cookies | **Implemented, degraded anonymously — honestly classified.** Reproduced live during this work (yt-dlp 2025.10.14): from a datacenter/cloud IP, anonymous access to even a **public** reel raises yt-dlp's combined `raise_login_required(...)` — "Requested content is not available, rate-limit reached or login required". yt-dlp cannot distinguish blocked-vs-deleted-vs-invalid anonymously, so we classify this as a distinct **`LoginRequiredError`** (message: "couldn't fetch anonymously; rate-limited or login required; an operator cookies file would enable it") — deliberately **NOT** `PrivateContentError`, since calling a public reel "private" was the reported bug (the old code matched "rate-limit reached"/"login required" as private markers; that has been fixed). Genuinely-private markers ("this account is private") still map to `PrivateContentError`. Operators can supply `INSTAGRAM_COOKIES_FILE` (their own logged-in session, mounted read-only) to restore access at their own ToS risk; the path is validated at startup (missing file → warning + anonymous fallback, never a crash). We do not bundle or harvest credentials, and do not bypass private/DRM/auth content. *Caveat:* a live SUCCESS could not be demonstrated from the build sandbox (datacenter IP is blocked and no operator cookies were available) — only the error **classification** is verified there; TikTok and YouTube were confirmed working in the same session, proving the failure is Instagram-specific, not a general breakage. |
 | X / Twitter | yt-dlp | **Implemented, best-effort.** Twitter/X's video API is presently inconsistent for yt-dlp (multiple currently-open upstream issues, e.g. `yt-dlp/yt-dlp#17563`, `#17058`) — some tweets extract fine, others return "no video found" even though a video is visible in-browser. We surface the real error instead of silently failing. |
 
 We will not bypass logins, paywalls, or DRM to "fix" the two degraded rows above —

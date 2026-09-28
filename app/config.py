@@ -79,6 +79,19 @@ class Settings(BaseSettings):
     FFPROBE_BINARY: str = Field(default="ffprobe")
     YTDLP_COOKIES_FILE: str = Field(default="", description="Optional cookies.txt for yt-dlp (operator-supplied)")
     INSTAGRAM_COOKIES_FILE: str = Field(default="", description="Optional cookies.txt scoped to Instagram")
+    # Cold default for the automatic video-quality pick (best|720|480|audio).
+    # Admins can override this live via the admin panel (stored in bot_settings
+    # under "auto_video_quality"); this is only the first-boot fallback.
+    AUTO_VIDEO_QUALITY: str = Field(
+        default="best", description="Automatic download quality: best|720|480|audio"
+    )
+
+    # --- Music search (text query -> numbered results) ---
+    SEARCH_PROVIDER: str = Field(default="itunes", description="Music search provider: 'itunes'")
+    SEARCH_COUNTRY: str = Field(default="US", description="iTunes storefront country code for search results")
+    SEARCH_RESULTS_PER_PAGE: int = Field(default=10, ge=1, le=10)
+    SEARCH_MAX_RESULTS: int = Field(default=50, ge=10, le=200, description="Total results fetched per query (paginated client-side)")
+    SEARCH_TIMEOUT_SECONDS: int = Field(default=15, ge=5, le=60)
 
     # --- Storage (temp files + S3 for large-file links) ---
     WORKDIR: str = Field(default="/data/tmp")

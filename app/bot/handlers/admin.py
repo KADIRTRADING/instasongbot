@@ -44,14 +44,22 @@ from app.bot.keyboards.admin import (
     build_limits_picker,
     build_media_type_picker,
     build_platform_toggle_keyboard,
+    build_quality_picker,
+    build_settings_keyboard,
 )
-from app.bot.keyboards.menu import MenuButtonFilter
+from app.bot.settings_store import (
+    get_auto_video_quality,
+    get_show_result_buttons,
+    set_auto_video_quality,
+    set_show_result_buttons,
+)
 from app.bot.states import (
     AdminBroadcastStates,
     AdminButtonStates,
     AdminCaptionStates,
     AdminLimitStates,
 )
+from app.config import Settings
 from app.constants import MediaType, Platform
 from app.db.repositories import (
     BotSettingRepository,
@@ -63,6 +71,7 @@ from app.db.repositories import (
 )
 from app.i18n.translator import Translator
 from app.services.captions.renderer import CaptionContext, CaptionRenderer
+from app.services.downloader.quality import VALID_QUALITIES
 
 router = Router(name="admin")
 
@@ -97,7 +106,6 @@ def _valid_platform(value: str) -> bool:
 
 
 @router.message(Command("admin"))
-@router.message(MenuButtonFilter("menu_admin"))
 async def cmd_admin(message: Message, translator: Translator, state: FSMContext) -> None:
     await state.clear()  # a fresh /admin always abandons any half-finished flow
     await message.answer(translator.t("admin_menu_title"), reply_markup=build_admin_menu(translator))
@@ -382,6 +390,52 @@ async def on_limit_value(message: Message, session: AsyncSession, translator: Tr
     await state.clear()
     await message.answer(translator.t("admin_limit_updated", target=display_target, limit_mb=limit_mb))
     await message.answer(translator.t("admin_menu_title"), reply_markup=build_admin_menu(translator))
+
+
+# --- Bot settings (auto quality / result buttons) ----------------------------
+
+
+async def _show_settings(callback: CallbackQuery, session: AsyncSession, translator: Translator, settings: Settings) -> None:
+    quality = await get_auto_video_quality(session, env_default=settings.AUTO_VIDEO_QUALITY)
+    show_buttons = await get_show_result_buttons(session)
+    if callback.message is not None:
+        await callback.message.edit_text(
+            translator.t("admin_settings_title"),
+            reply_markup=build_settings_keyboard(translator, quality=quality, show_buttons=show_buttons),
+        )
+
+
+@router.callback_query(F.data == "adm:settings")
+async def on_settings_menu(callback: CallbackQuery, session: AsyncSession, translator: Translator, settings: Settings) -> None:
+    await callback.answer()
+    await _show_settings(callback, session, translator, settings)
+
+
+@router.callback_query(F.data == "adm:setquality")
+async def on_pick_quality(callback: CallbackQuery, translator: Translator) -> None:
+    await callback.answer()
+    if callback.message is not None:
+        await callback.message.edit_text(translator.t("admin_pick_quality"), reply_markup=build_quality_picker(translator))
+
+
+@router.callback_query(F.data.startswith("adm:quality:"))
+async def on_quality_selected(callback: CallbackQuery, session: AsyncSession, translator: Translator, settings: Settings) -> None:
+    quality = callback.data.rsplit(":", maxsplit=1)[-1]
+    if quality not in VALID_QUALITIES:
+        await callback.answer()
+        return
+    await set_auto_video_quality(session, quality, updated_by=callback.from_user.id)
+    await callback.answer(translator.t("admin_quality_updated", value=translator.t(f"admin_quality_{quality}")))
+    await _show_settings(callback, session, translator, settings)
+
+
+@router.callback_query(F.data == "adm:togglebtns")
+async def on_toggle_result_buttons(callback: CallbackQuery, session: AsyncSession, translator: Translator, settings: Settings) -> None:
+    current = await get_show_result_buttons(session)
+    await set_show_result_buttons(session, not current, updated_by=callback.from_user.id)
+    state_key = "admin_state_disabled" if current else "admin_state_enabled"
+    await callback.answer(translator.t("admin_buttons_toggled", state=translator.t(state_key)))
+    await _show_settings(callback, session, translator, settings)
 
 
 # --- Broadcast ---------------------------------------------------------------

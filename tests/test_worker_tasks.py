@@ -1,6 +1,7 @@
-"""Tests for app/workers/tasks.py's recognize_job/probe_job/download_job/
-convert_job and their shared helpers (_resolve_max_download_bytes,
-_error_message, _deliver_file, _fail_job).
+"""Tests for app/workers/tasks.py's recognize_job/auto_download_job/
+download_job/convert_job/search_job/search_deliver_job and their shared
+helpers (_resolve_max_download_bytes, _error_message, _deliver_file,
+_fail_job).
 
 Follows the same pattern as tests/test_broadcast_job.py (which already
 covers broadcast_job): a REAL in-memory SQLite DB via the app's own session
@@ -38,10 +39,12 @@ from app.services.recognition.base import RecognitionProviderError, RecognitionR
 from app.workers.context import WorkerContext
 from app.workers.tasks import (
     _resolve_max_download_bytes,
+    auto_download_job,
     convert_job,
     download_job,
-    probe_job,
     recognize_job,
+    search_deliver_job,
+    search_job,
 )
 
 
@@ -89,12 +92,21 @@ def settings(tmp_path) -> Settings:
 
 @pytest.fixture
 def mock_bot() -> AsyncMock:
+    from types import SimpleNamespace
+
     bot = AsyncMock()
 
-    async def fake_edit_message_text(chat_id, message_id, text, reply_markup=None):
+    async def fake_edit_message_text(chat_id, message_id, text, reply_markup=None, **kwargs):
         return True
 
     bot.edit_message_text = AsyncMock(side_effect=fake_edit_message_text)
+    # Return realistic Message-shaped objects carrying a JSON-serializable
+    # file_id, so _extract_sent_file_id (used by auto_download_job's result
+    # cache) doesn't stash a non-serializable MagicMock. Tests that care about
+    # the specific file_id override these per-test.
+    bot.send_video = AsyncMock(return_value=SimpleNamespace(video=SimpleNamespace(file_id="VID_FILE_ID")))
+    bot.send_audio = AsyncMock(return_value=SimpleNamespace(audio=SimpleNamespace(file_id="AUD_FILE_ID")))
+    bot.send_photo = AsyncMock(return_value=SimpleNamespace(photo=[SimpleNamespace(file_id="PHOTO_FILE_ID")]))
     return bot
 
 
@@ -103,6 +115,7 @@ def worker_ctx(settings: Settings, fake_redis, mock_bot: AsyncMock) -> WorkerCon
     from app.services.downloader.manager import DownloadManager
     from app.services.media.ffmpeg_tools import MediaTools
     from app.services.recognition.factory import get_recognition_provider
+    from app.services.search.factory import get_search_provider
     from app.services.storage.factory import get_storage_backend
 
     return WorkerContext(
@@ -114,6 +127,7 @@ def worker_ctx(settings: Settings, fake_redis, mock_bot: AsyncMock) -> WorkerCon
         download_manager=DownloadManager(settings),
         media_tools=MediaTools(timeout_seconds=60),
         storage_backend=get_storage_backend(settings),
+        search_provider=get_search_provider(settings),
     )
 
 
@@ -436,55 +450,204 @@ async def test_recognize_job_expired_probe_link_fails_gracefully(db_engine, work
         assert job.status == "failed"
 
 
-# --- probe_job ----------------------------------------------------------
+# --- auto_download_job (probe + auto-pick + download + deliver, no menu) ----
 
 
-async def test_probe_job_image_shows_format_keyboard(db_engine, worker_ctx, mock_bot, fake_redis, monkeypatch) -> None:
+async def test_auto_download_job_single_video_downloads_and_sends(
+    db_engine, worker_ctx, mock_bot, fake_redis, monkeypatch
+) -> None:
     await _seed_user(10)
-    await _seed_job("job-10", 10, "probe", platform="pinterest")
+    await _seed_job("job-10", 10, "download", platform="youtube")
 
-    probe = _fake_image_probe(n_images=1)
+    probe = _fake_video_probe(n_formats=2)
     monkeypatch.setattr(worker_ctx.download_manager, "probe", AsyncMock(return_value=probe))
 
-    await probe_job({"worker_ctx": worker_ctx}, job_id="job-10", user_id=10, chat_id=999, message_id=5, url="https://pinterest.com/pin/1")
+    async def fake_download(probe_arg, format_id, job_dir, **kwargs):
+        path = job_dir / "video.mp4"
+        path.write_bytes(b"x" * 100)
+        return DownloadedFile(path=path, media_type=MediaType.VIDEO, title="A Video", uploader=None, ext="mp4", size_bytes=100)
 
+    monkeypatch.setattr(worker_ctx.download_manager, "download", fake_download)
+
+    await auto_download_job(
+        {"worker_ctx": worker_ctx}, job_id="job-10", user_id=10, chat_id=999, message_id=5, url="https://youtube.com/watch?v=x"
+    )
+
+    mock_bot.send_video.assert_called_once()
+    mock_bot.delete_message.assert_called_once_with(chat_id=999, message_id=5)
+
+    sm = db_session_module.get_sessionmaker()
+    async with sm() as session:
+        job = await JobRepository.get(session, "job-10")
+        assert job.status == "completed"
+        assert job.result_meta["auto"] is True
+
+    # The probe was cached (for the "Other options" action) and a result
+    # context was stashed (for Find song / Extract MP3 reuse).
+    from app.bot.probe_cache import load_probe_result
+
+    assert await load_probe_result(fake_redis, "job-10") is not None
+
+
+async def test_auto_download_job_attaches_result_buttons_when_enabled(
+    db_engine, worker_ctx, mock_bot, fake_redis, monkeypatch
+) -> None:
+    await _seed_user(14)
+    await _seed_job("job-14", 14, "download", platform="youtube")
+
+    probe = _fake_video_probe(n_formats=1)
+    monkeypatch.setattr(worker_ctx.download_manager, "probe", AsyncMock(return_value=probe))
+
+    # Give the sent video a real file_id so the result context stores it.
+    from types import SimpleNamespace
+
+    mock_bot.send_video = AsyncMock(return_value=SimpleNamespace(video=SimpleNamespace(file_id="SENTFILE123")))
+
+    async def fake_download(probe_arg, format_id, job_dir, **kwargs):
+        path = job_dir / "video.mp4"
+        path.write_bytes(b"x" * 100)
+        return DownloadedFile(path=path, media_type=MediaType.VIDEO, title="A Video", uploader=None, ext="mp4", size_bytes=100)
+
+    monkeypatch.setattr(worker_ctx.download_manager, "download", fake_download)
+
+    await auto_download_job(
+        {"worker_ctx": worker_ctx}, job_id="job-14", user_id=14, chat_id=999, message_id=5, url="https://youtube.com/watch?v=x"
+    )
+
+    _, kwargs = mock_bot.send_video.call_args
+    kb = kwargs["reply_markup"]
+    assert kb is not None
+    from app.bot.callback_data import ResultActionCallback
+
+    actions = {
+        ResultActionCallback.unpack(b.callback_data).action
+        for row in kb.inline_keyboard
+        for b in row
+        if b.callback_data and b.callback_data.startswith("ra:")
+    }
+    assert {"find", "mp3", "other"} <= actions
+
+    # The result context is stored under the token carried by the buttons,
+    # holding the reusable file_id.
+    from app.bot.result_cache import load_result_context
+
+    token = next(
+        ResultActionCallback.unpack(b.callback_data).token
+        for row in kb.inline_keyboard
+        for b in row
+        if b.callback_data and b.callback_data.startswith("ra:")
+    )
+    ctx = await load_result_context(fake_redis, token)
+    assert ctx is not None and ctx.file_id == "SENTFILE123" and ctx.belongs_to(14)
+
+
+async def test_auto_download_job_respects_show_result_buttons_off(
+    db_engine, worker_ctx, mock_bot, fake_redis, monkeypatch
+) -> None:
+    from app.bot.settings_store import set_show_result_buttons
+
+    await _seed_user(15)
+    await _seed_job("job-15", 15, "download", platform="youtube")
+
+    sm = db_session_module.get_sessionmaker()
+    async with sm() as session:
+        await set_show_result_buttons(session, False)
+        await session.commit()
+
+    probe = _fake_video_probe(n_formats=1)
+    monkeypatch.setattr(worker_ctx.download_manager, "probe", AsyncMock(return_value=probe))
+
+    async def fake_download(probe_arg, format_id, job_dir, **kwargs):
+        path = job_dir / "video.mp4"
+        path.write_bytes(b"x" * 100)
+        return DownloadedFile(path=path, media_type=MediaType.VIDEO, title="A Video", uploader=None, ext="mp4", size_bytes=100)
+
+    monkeypatch.setattr(worker_ctx.download_manager, "download", fake_download)
+
+    await auto_download_job(
+        {"worker_ctx": worker_ctx}, job_id="job-15", user_id=15, chat_id=999, message_id=5, url="https://youtube.com/watch?v=x"
+    )
+
+    _, kwargs = mock_bot.send_video.call_args
+    kb = kwargs["reply_markup"]
+    has_ra = kb is not None and any(
+        b.callback_data and b.callback_data.startswith("ra:") for row in kb.inline_keyboard for b in row
+    )
+    assert has_ra is False
+
+
+async def test_auto_download_job_respects_auto_quality_setting(
+    db_engine, worker_ctx, mock_bot, fake_redis, monkeypatch
+) -> None:
+    from app.bot.settings_store import set_auto_video_quality
+
+    await _seed_user(16)
+    await _seed_job("job-16", 16, "download", platform="youtube")
+
+    sm = db_session_module.get_sessionmaker()
+    async with sm() as session:
+        await set_auto_video_quality(session, "480")
+        await session.commit()
+
+    # probe returns 720p (video:0) and 480p (video:1) — quality "480" must pick video:1.
+    formats = (
+        MediaFormat(format_id="video:0", media_type=MediaType.VIDEO, label="720p", ext="mp4", width=1280, height=720),
+        MediaFormat(format_id="video:1", media_type=MediaType.VIDEO, label="480p", ext="mp4", width=854, height=480),
+    )
+    probe = ProbeResult(
+        platform="youtube", source_url="https://youtube.com/watch?v=x", title="t", uploader=None,
+        thumbnail_url=None, duration_seconds=60.0, formats=formats,
+    )
+    monkeypatch.setattr(worker_ctx.download_manager, "probe", AsyncMock(return_value=probe))
+
+    picked = {}
+
+    async def fake_download(probe_arg, format_id, job_dir, **kwargs):
+        picked["format_id"] = format_id
+        path = job_dir / "video.mp4"
+        path.write_bytes(b"x" * 100)
+        return DownloadedFile(path=path, media_type=MediaType.VIDEO, title="A Video", uploader=None, ext="mp4", size_bytes=100)
+
+    monkeypatch.setattr(worker_ctx.download_manager, "download", fake_download)
+
+    await auto_download_job(
+        {"worker_ctx": worker_ctx}, job_id="job-16", user_id=16, chat_id=999, message_id=5, url="https://youtube.com/watch?v=x"
+    )
+
+    assert picked["format_id"] == "video:1"  # the 480p format
+
+
+async def test_auto_download_job_carousel_shows_format_keyboard(
+    db_engine, worker_ctx, mock_bot, fake_redis, monkeypatch
+) -> None:
+    await _seed_user(17)
+    await _seed_job("job-17", 17, "download", platform="pinterest")
+
+    probe = _fake_image_probe(n_images=3)  # multi-image carousel
+    monkeypatch.setattr(worker_ctx.download_manager, "probe", AsyncMock(return_value=probe))
+
+    await auto_download_job(
+        {"worker_ctx": worker_ctx}, job_id="job-17", user_id=17, chat_id=999, message_id=5, url="https://pinterest.com/pin/1"
+    )
+
+    # A carousel is NOT auto-downloaded: it shows the choose-one/all keyboard.
+    mock_bot.send_photo.assert_not_called()
     mock_bot.edit_message_text.assert_called_once()
     _, kwargs = mock_bot.edit_message_text.call_args
     assert kwargs["reply_markup"] is not None
 
     sm = db_session_module.get_sessionmaker()
     async with sm() as session:
-        job = await JobRepository.get(session, "job-10")
+        job = await JobRepository.get(session, "job-17")
         assert job.status == "completed"
-        assert job.result_meta == {"platform": "pinterest"}
-
-    # Probe result was stashed in redis for the callback handler to retrieve later.
-    from app.bot.probe_cache import load_probe_result
-
-    cached = await load_probe_result(fake_redis, "job-10")
-    assert cached is not None
-    assert cached.platform == "pinterest"
+        assert job.result_meta.get("carousel") is True
 
 
-async def test_probe_job_video_shows_video_action_keyboard(db_engine, worker_ctx, mock_bot, monkeypatch) -> None:
-    await _seed_user(11)
-    await _seed_job("job-11", 11, "probe", platform="youtube")
-
-    probe = _fake_video_probe(n_formats=2)
-    monkeypatch.setattr(worker_ctx.download_manager, "probe", AsyncMock(return_value=probe))
-
-    await probe_job({"worker_ctx": worker_ctx}, job_id="job-11", user_id=11, chat_id=999, message_id=5, url="https://youtube.com/watch?v=x")
-
-    _, kwargs = mock_bot.edit_message_text.call_args
-    keyboard = kwargs["reply_markup"]
-    # 2 rows for upload (identify+audio) would be wrong here -- source="link"
-    # gets a 3rd "download original" row too (see build_video_action_keyboard).
-    assert len(keyboard.inline_keyboard) == 3
-
-
-async def test_probe_job_disabled_platform_fails_with_translated_error(db_engine, worker_ctx, mock_bot, monkeypatch) -> None:
+async def test_auto_download_job_disabled_platform_fails_with_translated_error(
+    db_engine, worker_ctx, mock_bot, monkeypatch
+) -> None:
     await _seed_user(12)
-    await _seed_job("job-12", 12, "probe", platform="tiktok")
+    await _seed_job("job-12", 12, "download", platform="tiktok")
 
     sm = db_session_module.get_sessionmaker()
     async with sm() as session:
@@ -495,7 +658,9 @@ async def test_probe_job_disabled_platform_fails_with_translated_error(db_engine
     probe = ProbeResult(**{**probe.__dict__, "platform": "tiktok"})
     monkeypatch.setattr(worker_ctx.download_manager, "probe", AsyncMock(return_value=probe))
 
-    await probe_job({"worker_ctx": worker_ctx}, job_id="job-12", user_id=12, chat_id=999, message_id=5, url="https://tiktok.com/@x/video/1")
+    await auto_download_job(
+        {"worker_ctx": worker_ctx}, job_id="job-12", user_id=12, chat_id=999, message_id=5, url="https://tiktok.com/@x/video/1"
+    )
 
     async with sm() as session:
         job = await JobRepository.get(session, "job-12")
@@ -505,13 +670,17 @@ async def test_probe_job_disabled_platform_fails_with_translated_error(db_engine
     assert "❌" in kwargs["text"]
 
 
-async def test_probe_job_content_not_found_fails_gracefully(db_engine, worker_ctx, mock_bot, monkeypatch) -> None:
+async def test_auto_download_job_content_not_found_fails_gracefully(
+    db_engine, worker_ctx, mock_bot, monkeypatch
+) -> None:
     await _seed_user(13)
-    await _seed_job("job-13", 13, "probe", platform="youtube")
+    await _seed_job("job-13", 13, "download", platform="youtube")
 
     monkeypatch.setattr(worker_ctx.download_manager, "probe", AsyncMock(side_effect=ContentNotFoundError("gone")))
 
-    await probe_job({"worker_ctx": worker_ctx}, job_id="job-13", user_id=13, chat_id=999, message_id=5, url="https://youtube.com/watch?v=x")
+    await auto_download_job(
+        {"worker_ctx": worker_ctx}, job_id="job-13", user_id=13, chat_id=999, message_id=5, url="https://youtube.com/watch?v=x"
+    )
 
     sm = db_session_module.get_sessionmaker()
     async with sm() as session:
@@ -805,16 +974,16 @@ async def test_download_job_delivers_video_via_send_video(db_engine, worker_ctx,
     mock_bot.send_audio.assert_not_called()
 
 
-async def test_probe_job_unexpected_error_still_fails_job_cleanly(db_engine, worker_ctx, mock_bot, monkeypatch) -> None:
+async def test_auto_download_job_unexpected_error_still_fails_job_cleanly(db_engine, worker_ctx, mock_bot, monkeypatch) -> None:
     """A non-DownloaderError exception (e.g. a bug elsewhere) must still be
     caught by the job's top-level boundary and recorded as failed -- never
     propagate out and crash the arq worker process (see module docstring)."""
     await _seed_user(52)
-    await _seed_job("job-52", 52, "probe", platform="youtube")
+    await _seed_job("job-52", 52, "download", platform="youtube")
 
     monkeypatch.setattr(worker_ctx.download_manager, "probe", AsyncMock(side_effect=RuntimeError("totally unexpected")))
 
-    await probe_job({"worker_ctx": worker_ctx}, job_id="job-52", user_id=52, chat_id=999, message_id=5, url="https://youtube.com/watch?v=x")
+    await auto_download_job({"worker_ctx": worker_ctx}, job_id="job-52", user_id=52, chat_id=999, message_id=5, url="https://youtube.com/watch?v=x")
 
     sm = db_session_module.get_sessionmaker()
     async with sm() as session:
@@ -874,3 +1043,138 @@ async def test_fail_job_still_marks_failed_even_if_edit_message_raises(db_engine
     async with sm() as session:
         job = await JobRepository.get(session, "job-40")
         assert job.status == "failed"  # still recorded, even though notifying the user failed
+
+
+
+# --- search_job / search_deliver_job -----------------------------------------
+
+
+def _search_result(title="Levitating", artist="Dua Lipa", preview="https://example.com/p.m4a", official="https://music.apple.com/x", version=""):
+    from app.services.search.base import SearchResult
+
+    return SearchResult(
+        title=title,
+        artist=artist,
+        album="Future Nostalgia",
+        duration_seconds=203,
+        preview_url=preview,
+        official_url=official,
+        artwork_url="https://example.com/art.jpg",
+        is_downloadable_preview=bool(preview),
+        version=version,
+    )
+
+
+async def test_search_job_renders_numbered_results_and_caches(db_engine, worker_ctx, mock_bot, fake_redis, monkeypatch) -> None:
+    await _seed_user(60)
+    await _seed_job("job-60", 60, "recognize")
+
+    results = [_search_result(title=f"Levitating {i}") for i in range(12)]
+    monkeypatch.setattr(worker_ctx.search_provider, "search", AsyncMock(return_value=results))
+
+    await search_job({"worker_ctx": worker_ctx}, job_id="job-60", user_id=60, chat_id=999, message_id=5, query="levitating")
+
+    mock_bot.edit_message_text.assert_called_once()
+    _, kwargs = mock_bot.edit_message_text.call_args
+    assert kwargs["reply_markup"] is not None
+    assert "Levitating" in kwargs["text"]
+
+    sm = db_session_module.get_sessionmaker()
+    async with sm() as session:
+        job = await JobRepository.get(session, "job-60")
+        assert job.status == "completed"
+        assert job.result_meta["results"] == 12
+
+
+async def test_search_job_no_results_message(db_engine, worker_ctx, mock_bot, monkeypatch) -> None:
+    await _seed_user(61)
+    await _seed_job("job-61", 61, "recognize")
+
+    monkeypatch.setattr(worker_ctx.search_provider, "search", AsyncMock(return_value=[]))
+
+    await search_job({"worker_ctx": worker_ctx}, job_id="job-61", user_id=61, chat_id=999, message_id=5, query="zzznope")
+
+    _, kwargs = mock_bot.edit_message_text.call_args
+    assert kwargs.get("reply_markup") is None
+    assert "😕" in kwargs["text"]
+
+
+async def test_search_job_provider_error_fails_with_translated_message(db_engine, worker_ctx, mock_bot, monkeypatch) -> None:
+    from app.services.search.base import SearchProviderError
+
+    await _seed_user(62)
+    await _seed_job("job-62", 62, "recognize")
+
+    monkeypatch.setattr(worker_ctx.search_provider, "search", AsyncMock(side_effect=SearchProviderError("itunes down")))
+
+    await search_job({"worker_ctx": worker_ctx}, job_id="job-62", user_id=62, chat_id=999, message_id=5, query="x")
+
+    sm = db_session_module.get_sessionmaker()
+    async with sm() as session:
+        job = await JobRepository.get(session, "job-62")
+        assert job.status == "failed"
+
+
+async def test_search_deliver_job_sends_labeled_preview_and_official_button(db_engine, worker_ctx, mock_bot, monkeypatch, tmp_path) -> None:
+    await _seed_user(63)
+    await _seed_job("job-63", 63, "recognize")
+
+    async def fake_download_preview(ctx, url, job_dir):
+        p = job_dir / "preview.m4a"
+        p.write_bytes(b"audio")
+        return p
+
+    monkeypatch.setattr("app.workers.tasks._download_preview", fake_download_preview)
+
+    await search_deliver_job(
+        {"worker_ctx": worker_ctx},
+        job_id="job-63",
+        user_id=63,
+        chat_id=999,
+        message_id=5,
+        title="Levitating",
+        artist="Dua Lipa",
+        preview_url="https://example.com/p.m4a",
+        official_url="https://music.apple.com/x",
+    )
+
+    mock_bot.send_audio.assert_called_once()
+    _, kwargs = mock_bot.send_audio.call_args
+    # Honesty: caption clearly labels it a 30-second preview, and an official
+    # full-song URL button is attached.
+    assert "preview" in kwargs["caption"].lower()
+    assert kwargs["reply_markup"].inline_keyboard[0][0].url == "https://music.apple.com/x"
+
+    sm = db_session_module.get_sessionmaker()
+    async with sm() as session:
+        job = await JobRepository.get(session, "job-63")
+        assert job.status == "completed"
+        assert job.result_meta["delivered"] == "preview"
+
+
+async def test_search_deliver_job_no_preview_sends_official_link_only(db_engine, worker_ctx, mock_bot) -> None:
+    await _seed_user(64)
+    await _seed_job("job-64", 64, "recognize")
+
+    await search_deliver_job(
+        {"worker_ctx": worker_ctx},
+        job_id="job-64",
+        user_id=64,
+        chat_id=999,
+        message_id=5,
+        title="Rare Track",
+        artist="Someone",
+        preview_url="",
+        official_url="https://music.apple.com/y",
+    )
+
+    # No audio sent — honest official-link-only delivery.
+    mock_bot.send_audio.assert_not_called()
+    _, kwargs = mock_bot.edit_message_text.call_args
+    assert kwargs["reply_markup"].inline_keyboard[0][0].url == "https://music.apple.com/y"
+
+    sm = db_session_module.get_sessionmaker()
+    async with sm() as session:
+        job = await JobRepository.get(session, "job-64")
+        assert job.status == "completed"
+        assert job.result_meta["delivered"] == "official_link"

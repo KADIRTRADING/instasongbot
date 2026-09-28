@@ -1,14 +1,17 @@
 # InstaSongBot
 
-A Telegram bot that:
+A Telegram bot with a **fully automatic, menu-free UX** — you just send it something and it figures out what to do from the content:
 
-- 🎵 **Identifies songs** from a voice message, audio file, or video clip.
-- ⬇️ **Downloads media** from Pinterest, Instagram, TikTok, YouTube, Facebook, and X — including Pinterest multi-image carousels, one image (or all) at a time.
-- 🎧 **Converts video to MP3** — from an uploaded file or a supported link.
-- 🛠 Ships a Telegram-native **admin panel**: editable caption templates, per-media-type buttons, per-platform enable/disable toggles, live usage stats, configurable file-size limits, and broadcast announcements.
+- 🔗 **Send a link** (Instagram, TikTok, YouTube, Facebook, X, Pinterest) → it **downloads the video automatically**, no format-selection step. Under the video it offers optional inline actions: *Find this song*, *Extract MP3*, *Other quality/options*. Pinterest multi-image carousels still let you pick one image or grab all of them.
+- 🎵 **Type a song name or artist** → it **searches and returns up to 10 numbered results** (artist, title, version, duration) with Previous/Next paging. Pick a number and it sends a clearly-labeled **30-second preview** plus an official "open full song" link — never a full track it can't legitimately redistribute.
+- 🎤 **Send a voice message or audio clip** → it **identifies the song**.
+- 🎬 **Send a video file** → it **auto-identifies the music** and offers to **extract the MP3**.
+- 🛠 Ships a Telegram-native **admin panel**: editable caption templates, per-media-type buttons, per-platform enable/disable toggles, live usage stats, configurable file-size limits, **auto-download quality + result-button settings**, and broadcast announcements.
 - 🌐 Speaks **Uzbek, Russian, and English**, switchable per-user.
 
-Built with Python 3.12, [aiogram 3](https://docs.aiogram.dev/), PostgreSQL, Redis, [arq](https://arq-docs.helpmanual.io/) for background jobs, and `ffmpeg`/`yt-dlp` for media handling. See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full design rationale, database schema, and — importantly — an honest per-platform support matrix (§8): which platforms are live-tested versus best-effort, and why.
+There is no persistent menu to tap through: content routing is automatic (`/start` just explains what you can send). `/help`, `/language`, and `/admin` remain available as commands.
+
+Built with Python 3.12, [aiogram 3](https://docs.aiogram.dev/), PostgreSQL, Redis, [arq](https://arq-docs.helpmanual.io/) for background jobs, `ffmpeg`/`yt-dlp` for media handling, and the free, keyless [Apple iTunes Search API](https://performance-partners.apple.com/search-api) for music text search. See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full design rationale, database schema, and — importantly — an honest per-platform support matrix (§8): which platforms are live-tested versus best-effort, and why.
 
 ## Contents
 
@@ -73,7 +76,7 @@ The bot defaults to [AudD](https://audd.io/) for song identification (see [ARCHI
 
 ### 4. Nothing else is required to start
 
-Pinterest, TikTok, YouTube, Facebook, and X downloads work with no additional API keys or accounts — see [ARCHITECTURE.md §7/§8](ARCHITECTURE.md#7-pinterest-how-we-actually-support-it-video--images--multi-image-posts) for how. Instagram currently needs an optional cookies file to work reliably (see below); this is a known, honestly-documented platform limitation, not a bug.
+Pinterest, TikTok, YouTube, Facebook, and X downloads work with no additional API keys or accounts — see [ARCHITECTURE.md §7/§8](ARCHITECTURE.md#7-pinterest-how-we-actually-support-it-video--images--multi-image-posts) for how. **Music text search** uses the Apple iTunes Search API, which is free and needs **no API key or account** (`SEARCH_PROVIDER=itunes`, the default). Instagram currently needs an optional cookies file to work reliably from a datacenter IP (see below); this is a known, honestly-documented platform limitation, not a bug.
 
 ## Configuration reference
 
@@ -87,6 +90,9 @@ Every environment variable is documented inline in **[`.env.example`](.env.examp
 | `USE_WEBHOOK` | `false` (default, long polling) or `true` (webhook — needs `WEBHOOK_BASE_URL`). See [below](#webhook-mode-vs-long-polling). |
 | `STORAGE_BACKEND` | `local` (default, zero AWS setup) or `s3` (recommended past one box). See [Large files](#large-files). |
 | `RECOGNITION_PROVIDER` | `audd` (default) or `acrcloud`. |
+| `SEARCH_PROVIDER` | `itunes` (default; free, no key). Music text-search backend. |
+| `AUTO_VIDEO_QUALITY` | `best` (default) / `720` / `480` / `audio`. First-boot default for the automatic link-download quality; changeable live in the admin panel. |
+| `INSTAGRAM_COOKIES_FILE` | Optional path to an operator-supplied `cookies.txt` (mount read-only) to enable Instagram fetches from a blocked datacenter IP. |
 
 Admins can also tune rate limits and file-size limits **live, from the Telegram admin panel**, without touching `.env` or redeploying — those environment variables are only the cold, first-boot defaults.
 
@@ -211,13 +217,14 @@ Two backends:
 
 ## Admin panel
 
-Available to every numeric ID listed in `ADMIN_IDS`, via the `/admin` command or the "🛠 Admin Panel" reply-keyboard button:
+Available to every numeric ID listed in `ADMIN_IDS`, via the `/admin` command:
 
 - **✏️ Edit Captions** — per-media-type (video/audio/image) caption templates. Supports `{title}`, `{artist}`, `{source}`, `{bot_username}` placeholders.
 - **🔗 Manage Buttons** — inline buttons attached under every delivered video/audio/photo, scoped to one media type or all of them.
 - **🎚 Platforms** — enable/disable each of the six supported platforms independently, live.
 - **📊 Statistics** — total/new users, job counts by status/type/platform.
 - **⚙️ File Size Limits** — override the download-size cap globally or per-platform, without editing `.env` or restarting anything.
+- **⚙️ Bot Settings** — the **automatic download quality** (`best` / `720` / `480` / `audio-only`) applied to the no-menu link flow, and whether the optional **result-action buttons** (*Find this song* / *Extract MP3* / *Other options*) appear under downloaded videos. Both are stored live in the database; the `.env` values are only first-boot defaults.
 - **📢 Announcement** — broadcast a message to every non-banned user; runs as its own background job so it can't block anything else, with a preview-and-confirm step before it actually sends.
 
 ## Development
@@ -241,7 +248,19 @@ Check `docker compose logs bot`. Most commonly: `BOT_TOKEN` is wrong/has a typo,
 Your Telegram user ID isn't in `ADMIN_IDS`. Double check via @userinfobot and that you restarted the bot after editing `.env` (admin allow-listing is intentionally an env-based, restart-required security boundary — see [ARCHITECTURE.md §11](ARCHITECTURE.md#11-deployment-topology)).
 
 **Instagram links fail / X (Twitter) links sometimes fail.**
-Documented, honest platform limitations, not bugs in this project — see the [platform support matrix](ARCHITECTURE.md#8-platform-support-matrix-honesty-section) in ARCHITECTURE.md §8 for exactly what's going on with each and the relevant upstream `yt-dlp` issue trackers. Instagram specifically can be improved by supplying your own `INSTAGRAM_COOKIES_FILE` (see `.env.example`) — at your own account's ToS risk.
+Documented, honest platform limitations, not bugs in this project — see the [platform support matrix](ARCHITECTURE.md#8-platform-support-matrix-honesty-section) in ARCHITECTURE.md §8 for exactly what's going on with each and the relevant upstream `yt-dlp` issue trackers.
+
+Instagram specifically: from a datacenter/cloud IP (which is what most servers are), yt-dlp's *anonymous* access to even a **public** reel is frequently blocked, and yt-dlp returns a single combined "requested content is not available, rate-limit reached or login required" message. The bot classifies this **honestly** as a *login-required / rate-limited* state (message: "couldn't fetch anonymously…") — **not** as "this content is private", which would be a lie for a public reel. To actually download such links, supply your own cookies:
+
+1. Export a `cookies.txt` from a browser logged into an Instagram account **you control** (e.g. via a "Get cookies.txt" browser extension).
+2. Mount it **read-only** into the worker container. In `docker-compose.yml`, uncomment the worker's cookies volume and adjust the host path:
+   ```yaml
+   # under services.worker.volumes:
+   - ./secrets/instagram_cookies.txt:/data/cookies/instagram_cookies.txt:ro
+   ```
+3. Point `.env` at the in-container path: `INSTAGRAM_COOKIES_FILE=/data/cookies/instagram_cookies.txt`.
+
+The bot validates that path at startup: if the file is missing it logs a warning and falls back to anonymous access rather than crashing. This only re-enables normal access the platform is IP-blocking — it does **not** bypass genuinely private, DRM-protected, or auth-walled content, and you use it at your own account's ToS risk.
 
 **YouTube downloads fail with a format/extraction error.**
 YouTube periodically requires yt-dlp to run a small JS challenge via an external JS runtime. The Docker image bundles [Deno](https://deno.com/) for exactly this; if you're running without Docker, make sure `deno` is on `PATH` (`deno --version` should work).

@@ -14,12 +14,77 @@ from __future__ import annotations
 import ipaddress
 import re
 import socket
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from app.constants import Platform
 from app.services.downloader.errors import UnsafeURLError
 
 _URL_RE = re.compile(r"https?://[^\s<>\"]+", re.IGNORECASE)
+
+# Query-string keys that are pure share/tracking noise (analytics, share-sheet
+# provenance) and are safe to strip so the same content shared two different
+# ways normalizes to one canonical URL. Deliberately does NOT include real
+# content params like YouTube's `v` or `t` (timestamp).
+_TRACKING_PARAMS = frozenset(
+    {
+        "igsh",
+        "igshid",
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "utm_term",
+        "utm_content",
+        "si",
+        "feature",
+        "fbclid",
+        "gclid",
+        "ref",
+        "ref_src",
+        "ref_url",
+    }
+)
+
+# Instagram content lives at /reel/<id>, /reels/<id>, /p/<id>, or /tv/<id>.
+# The share sheet emits /reels/ (plural) and appends ?igsh=...; the canonical
+# form the extractor is happiest with is /reel/<id>/ (singular). See
+# app/services/downloader/ytdlp_client.py and the task-2 Instagram diagnosis.
+_INSTAGRAM_ID_RE = re.compile(r"/(reel|reels|p|tv)/([A-Za-z0-9_-]+)", re.IGNORECASE)
+
+
+def normalize_url(url: str) -> str:
+    """Return a canonical, tracking-param-free form of `url`.
+
+    Safe/idempotent for any input: a non-http(s) string or an unparseable URL
+    is returned unchanged. This runs BEFORE platform detection / probing so a
+    reel pasted from Instagram's share sheet
+    (https://www.instagram.com/reel/ABC/?igsh=...) and the same reel's plain
+    URL both resolve to one thing, and so downstream de-dup / caching sees a
+    stable key. It never removes real content parameters (e.g. YouTube `v`).
+    """
+    stripped = url.strip()
+    try:
+        parsed = urlparse(stripped)
+    except ValueError:
+        return stripped
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return stripped
+
+    host = parsed.hostname.lower()
+
+    # Instagram: collapse /reels/ -> /reel/ and reduce to the bare canonical
+    # post URL (the extractor keys off the id; extra path/query is just noise).
+    if host == "instagram.com" or host.endswith(".instagram.com"):
+        match = _INSTAGRAM_ID_RE.search(parsed.path)
+        if match:
+            kind = match.group(1).lower()
+            kind = "reel" if kind in ("reel", "reels") else kind
+            return f"https://www.instagram.com/{kind}/{match.group(2)}/"
+
+    kept_params = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=False) if k.lower() not in _TRACKING_PARAMS]
+    query = urlencode(kept_params)
+
+    netloc = f"{host}:{parsed.port}" if parsed.port else host
+    return urlunparse((parsed.scheme, netloc, parsed.path, "", query, ""))
 
 # Ordered so more specific hosts (e.g. "m.youtube.com") match before broader
 # checks would be needed; each entry is (Platform, compiled hostname regex).

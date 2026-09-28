@@ -22,9 +22,51 @@ def build_admin_menu(translator: Translator) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text=translator.t("admin_menu_platforms"), callback_data=f"{_PREFIX}:platforms")],
         [InlineKeyboardButton(text=translator.t("admin_menu_stats"), callback_data=f"{_PREFIX}:stats")],
         [InlineKeyboardButton(text=translator.t("admin_menu_limits"), callback_data=f"{_PREFIX}:limits")],
+        [InlineKeyboardButton(text=translator.t("admin_menu_settings"), callback_data=f"{_PREFIX}:settings")],
         [InlineKeyboardButton(text=translator.t("admin_menu_broadcast"), callback_data=f"{_PREFIX}:broadcast")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def build_settings_keyboard(
+    translator: Translator, *, quality: str, show_buttons: bool
+) -> InlineKeyboardMarkup:
+    """The bot-settings screen: current auto video quality + result-buttons
+    toggle, each row tappable to change it. Shows the live values so an admin
+    always sees the current state (re-read from the DB by the caller)."""
+    quality_label = translator.t(f"admin_quality_{quality}")
+    buttons_label = translator.t("admin_state_enabled" if show_buttons else "admin_state_disabled")
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=translator.t("admin_settings_quality", value=quality_label),
+                callback_data=f"{_PREFIX}:setquality",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text=translator.t("admin_settings_buttons", value=buttons_label),
+                callback_data=f"{_PREFIX}:togglebtns",
+            )
+        ],
+    ]
+    return _with_back_row(InlineKeyboardMarkup(inline_keyboard=rows), translator)
+
+
+def build_quality_picker(translator: Translator) -> InlineKeyboardMarkup:
+    """One row per auto-download quality option."""
+    from app.services.downloader.quality import VALID_QUALITIES
+
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=translator.t(f"admin_quality_{quality}"),
+                callback_data=f"{_PREFIX}:quality:{quality}",
+            )
+        ]
+        for quality in VALID_QUALITIES
+    ]
+    return _with_back_row(InlineKeyboardMarkup(inline_keyboard=rows), translator)
 
 
 def build_back_to_admin_menu_keyboard(translator: Translator) -> InlineKeyboardMarkup:

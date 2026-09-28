@@ -36,6 +36,23 @@ class RateLimitedError(DownloaderError):
     """The upstream platform is throttling us; retry later."""
 
 
+class LoginRequiredError(DownloaderError):
+    """The platform requires an authenticated session (operator-supplied
+    cookies) to fetch this content anonymously — distinct from
+    PrivateContentError, which means the content itself is private/friends-only.
+
+    This exists specifically because platforms like Instagram now return a
+    single combined "not available, rate-limited, or login required" message
+    for anonymous requests from datacenter IPs, which is NOT the same as the
+    post being private. Mapping that to PrivateContentError (as the code used
+    to) told users a public reel was "private", which was wrong. We surface
+    this as its own honest state: "couldn't fetch anonymously right now; the
+    operator can supply a cookies file to enable it" — see
+    app/services/downloader/ytdlp_client.py's Instagram classification and
+    ARCHITECTURE/README's cookie-mount docs.
+    """
+
+
 class FileTooLargeError(DownloaderError):
     """The resolved media exceeds MAX_DOWNLOAD_MB."""
 
