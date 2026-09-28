@@ -1,0 +1,35 @@
+# Core bot framework
+aiogram==3.22.0
+# Pulled in transitively by aiogram, but pinned explicitly since app/file_server.py
+# and app/webhook_app.py both import it directly for the webhook/file-serving HTTP app.
+aiohttp==3.12.15
+
+# Database
+SQLAlchemy==2.0.54
+asyncpg==0.31.0
+alembic==1.16.5
+
+# Background jobs / cache / rate limiting
+# Pinned <6 because arq 0.28.0 requires redis<6,>=4.2.0
+arq==0.28.0
+redis==5.3.1
+
+# HTTP client (recognition providers, Pinterest client, health checks)
+httpx==0.28.1
+tenacity==9.1.2
+
+# Media download & processing
+yt-dlp==2025.10.14
+
+# Config & logging
+# Pinned <2.12 because aiogram 3.22.0 requires pydantic<2.12,>=2.4.1
+pydantic==2.11.10
+pydantic-settings==2.11.0
+structlog==25.5.0
+
+# Object storage (S3 / S3-compatible)
+boto3==1.42.97
+
+# Misc utilities
+# Pinned <24.2 because aiogram 3.22.0 requires aiofiles<24.2,>=23.2.1
+aiofiles==24.1.0

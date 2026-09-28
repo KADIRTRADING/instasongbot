@@ -1,0 +1,31 @@
+{
+  "status": "success",
+  "result": {
+    "artist": "Tears For Fears",
+    "title": "Everybody Wants To Rule The World",
+    "album": "Songs From The Big Chair",
+    "release_date": "2014-11-10",
+    "label": "UMC (Universal Music Catalogue)",
+    "timecode": "00:56",
+    "song_link": "https://lis.tn/NbkVb",
+    "apple_music": {
+      "artwork": {
+        "width": 3000,
+        "height": 3000,
+        "url": "https://is1-ssl.mzstatic.com/image/thumb/Music211/v4/36/c5/e9/example/25UMGIM46809.rgb.jpg/{w}x{h}bb.jpg"
+      },
+      "url": "https://music.apple.com/us/album/everybody-wants-to-rule-the-world/1802683036"
+    },
+    "deezer": {
+      "link": "https://www.deezer.com/track/1761563107",
+      "album": {
+        "cover_big": "https://cdn-images.dzcdn.net/images/cover/example/500x500-000000-80-0-0.jpg"
+      }
+    },
+    "spotify": {
+      "external_urls": {
+        "spotify": "https://open.spotify.com/track/5B9qVIyjqeWkeOAp2tJgqL"
+      }
+    }
+  }
+}

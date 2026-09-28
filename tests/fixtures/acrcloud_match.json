@@ -1,0 +1,25 @@
+{
+  "metadata": {
+    "timestamp_utc": "2020-01-19 02:58:28",
+    "music": [
+      {
+        "artists": [{ "name": "Adele" }],
+        "acrid": "6049f11da7095e8bb8266871d4a70873",
+        "album": { "name": "Hello" },
+        "external_ids": { "isrc": "GBBKS1500214" },
+        "title": "Hello",
+        "duration_ms": 295000,
+        "label": "XL Recording",
+        "external_metadata": {
+          "spotify": { "track": { "id": "4aebBr4JAihzJQR0CiIZJv" } },
+          "deezer": { "track": { "id": "110265034" } },
+          "youtube": { "vid": "YQHsXMglC9A" }
+        },
+        "score": 100,
+        "release_date": "2015-10-23"
+      }
+    ]
+  },
+  "status": { "msg": "Success", "version": "1.0", "code": 0 },
+  "result_type": 0
+}

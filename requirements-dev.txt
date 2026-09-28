@@ -1,0 +1,14 @@
+-r requirements.txt
+
+# Testing
+pytest==8.4.2
+pytest-asyncio==1.2.0
+respx==0.23.1
+fakeredis==2.38.0
+# lupa gives fakeredis real Lua EVAL/EVALSHA support, needed to test
+# app/services/ratelimit/limiter.py's sliding-window script without a real Redis.
+lupa==2.8
+aiosqlite==0.22.1
+
+# Lint / format
+ruff==0.16.9

@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Runtime data
+tmp/
+data/
+*.log
+media_cache/
+
+# Local bot API server data
+telegram-bot-api-data/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Coverage
+.coverage
+htmlcov/
